@@ -1,0 +1,24 @@
+{
+  "name": "llm-council-tool",
+  "version": "0.1.0",
+  "private": true,
+  "description": "GitHub Action: PR review using an LLM",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/copy-dist.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "review:local": "node dist/runner.js",
+    "council:local": "node dist/cli/council.js",
+    "feedback": "node dist/cli/feedback.js",
+    "agents:gen": "node dist/cli/agents-gen.js"
+  },
+  "dependencies": {
+    "@actions/core": "^1.11.1",
+    "@actions/github": "^6.0.0",
+    "octokit": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.2.0",
+    "typescript": "^5.6.3"
+  }
+}
