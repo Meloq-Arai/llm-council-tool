@@ -25,6 +25,14 @@ inputs:
     description: "Max total characters of diff content sent to the model"
     required: false
     default: "120000"
+  output_dir:
+    description: "Directory (relative to GITHUB_WORKSPACE) to write review outputs"
+    required: false
+    default: ".llm-council-tool"
+  write_files:
+    description: "If false, do not write output files"
+    required: false
+    default: "true"
 
 runs:
   using: "node20"
