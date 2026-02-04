@@ -19,7 +19,9 @@ jobs:
       - name: Run LLM review
         uses: ./. 
         with:
+          github_token: ${{ github.token }}
           openai_api_key: ${{ secrets.OPENAI_API_KEY }}
           openai_model: gpt-4.1-mini
           max_files: 25
           max_patch_chars: 6000
+          max_total_chars: 120000

@@ -3,7 +3,7 @@ export function buildRolePrompt(role: string, diff: string): string {
     'You are part of an AI code review council.',
     'Review the following diff and produce actionable feedback.',
     'Be concise, high-signal, and avoid nitpicks unless they reduce bugs.',
-    'Output Markdown.',
+    'Output JSON ONLY. Do not wrap in Markdown or code fences.',
   ].join('\n');
 
   const roleHint = (() => {
@@ -23,5 +23,5 @@ export function buildRolePrompt(role: string, diff: string): string {
     }
   })();
 
-  return `${common}\n\nRole: ${role}\nRole focus: ${roleHint}\n\nOutput format:\nReturn a single JSON object (no markdown) with this shape:\n{\n  \"summary\": string,\n  \"findings\": [\n    {\n      \"title\": string,\n      \"severity\": \"info\"|\"low\"|\"medium\"|\"high\"|\"critical\",\n      \"file\"?: string,\n      \"lineStart\"?: number,\n      \"lineEnd\"?: number,\n      \"message\": string,\n      \"suggestion\"?: string\n    }\n  ],\n  \"questions\": string[]\n}\n\nDiff:\n\n${diff}`;
+  return `${common}\n\nRole: ${role}\nRole focus: ${roleHint}\n\nOutput format:\nReturn a single JSON object with this exact shape:\n{\n  \"schemaVersion\": 1,\n  \"summary\": string,\n  \"findings\": [\n    {\n      \"title\": string,\n      \"severity\": \"info\"|\"low\"|\"medium\"|\"high\"|\"critical\",\n      \"file\"?: string,\n      \"lineStart\"?: number,\n      \"lineEnd\"?: number,\n      \"message\": string,\n      \"suggestion\"?: string\n    }\n  ],\n  \"questions\": string[]\n}\n\nIf you are uncertain or there is nothing to report, return:\n{\"schemaVersion\":1,\"summary\":\"\",\"findings\":[],\"questions\":[]}\n\nDiff:\n\n${diff}`;
 }

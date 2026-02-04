@@ -1,6 +1,7 @@
 import * as core from '@actions/core';
 import * as github from '@actions/github';
-import { Octokit } from 'octokit';
+
+import { callOpenAI } from './lib/openai.js';
 
 type PRFile = {
   filename: string;
@@ -13,10 +14,20 @@ type PRFile = {
 
 function shouldReviewFile(f: PRFile): boolean {
   const lower = f.filename.toLowerCase();
+
+  // common junk
   if (lower.endsWith('.lock')) return false;
-  if (lower.includes('package-lock.json')) return false;
-  if (lower.includes('pnpm-lock.yaml')) return false;
-  if (lower.includes('yarn.lock')) return false;
+  if (lower.endsWith('package-lock.json')) return false;
+  if (lower.endsWith('pnpm-lock.yaml')) return false;
+  if (lower.endsWith('yarn.lock')) return false;
+
+  // typical generated/vendor paths
+  if (lower.includes('/dist/') || lower.includes('\\dist\\')) return false;
+  if (lower.includes('/build/') || lower.includes('\\build\\')) return false;
+  if (lower.includes('/vendor/') || lower.includes('\\vendor\\')) return false;
+
+  // minified
+  if (lower.endsWith('.min.js') || lower.endsWith('.min.css')) return false;
 
   // skip trivial
   if ((f.additions + f.deletions) < 10) return false;
@@ -26,10 +37,15 @@ function shouldReviewFile(f: PRFile): boolean {
 
 async function main() {
   try {
+    const ghToken = core.getInput('github_token') || process.env.GITHUB_TOKEN;
+    if (!ghToken) throw new Error('GitHub token is missing (github_token input / GITHUB_TOKEN env)');
+
     const openaiApiKey = core.getInput('openai_api_key', { required: true });
     const openaiModel = core.getInput('openai_model') || 'gpt-4.1-mini';
+
     const maxFiles = Number(core.getInput('max_files') || '25');
     const maxPatchChars = Number(core.getInput('max_patch_chars') || '6000');
+    const maxTotalChars = Number(core.getInput('max_total_chars') || '120000');
 
     const ctx = github.context;
     if (ctx.eventName !== 'pull_request' && ctx.eventName !== 'pull_request_target') {
@@ -43,12 +59,9 @@ async function main() {
     const { owner, repo } = ctx.repo;
     const prNumber: number = pr.number;
 
-    const ghToken = process.env.GITHUB_TOKEN;
-    if (!ghToken) throw new Error('GITHUB_TOKEN is missing');
+    const octokit = github.getOctokit(ghToken);
 
-    const octokit = new Octokit({ auth: ghToken });
-
-    // Fetch changed files
+    // Fetch changed files (paginated)
     const files: PRFile[] = [];
     let page = 1;
     while (true) {
@@ -73,57 +86,89 @@ async function main() {
       return;
     }
 
-    // Build a compact prompt (MVP: one comment, not inline suggestions)
-    const patches = selected.map((f) => {
+    // Build a bounded diff payload
+    const parts: string[] = [];
+    let total = 0;
+
+    for (const f of selected) {
       const patch = (f.patch || '').slice(0, maxPatchChars);
-      return `FILE: ${f.filename}\nSTATUS: ${f.status}\nCHANGES: +${f.additions}/-${f.deletions}\nPATCH:\n${patch || '[no patch provided by GitHub]'}\n`;
-    }).join('\n---\n');
+      const block =
+        `FILE: ${f.filename}\n` +
+        `STATUS: ${f.status}\n` +
+        `CHANGES: +${f.additions}/-${f.deletions}\n` +
+        `PATCH:\n${patch || '[no patch provided by GitHub]'}\n`;
 
-    const prompt = `You are a senior code reviewer. Review the following GitHub PR diffs.
-
-Rules:
-- Be concise and specific.
-- Prefer high-signal issues: correctness, security, edge cases, maintainability.
-- If you suggest a change, show a short code snippet.
-- Output Markdown.
-
-Diffs:\n\n${patches}`;
-
-    // Call OpenAI (MVP: direct HTTPS fetch to Responses API)
-    // NOTE: We keep it simple and avoid extra deps.
-    const resp = await fetch('https://api.openai.com/v1/responses', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${openaiApiKey}`,
-      },
-      body: JSON.stringify({
-        model: openaiModel,
-        input: prompt,
-      }),
-    });
-
-    if (!resp.ok) {
-      const text = await resp.text();
-      throw new Error(`OpenAI API error: ${resp.status} ${resp.statusText}\n${text}`);
+      if (total + block.length > maxTotalChars) break;
+      parts.push(block);
+      total += block.length;
     }
 
-    const data: any = await resp.json();
-    const outputText: string =
-      data.output_text ||
-      data.output?.map((o: any) => o?.content?.map((c: any) => c?.text)?.join('') ).join('\n') ||
-      JSON.stringify(data, null, 2);
+    const patches = parts.join('\n---\n');
 
-    const body = `## 🤖 LLM Review (MVP)\n\nModel: \`${openaiModel}\`\n\n${outputText}`;
+    const prompt =
+      `You are a senior code reviewer. Review the following GitHub PR diffs.\n\n` +
+      `Rules:\n` +
+      `- Be concise and specific.\n` +
+      `- Prefer high-signal issues: correctness, security, edge cases, maintainability.\n` +
+      `- If you suggest a change, show a short code snippet.\n` +
+      `- Output Markdown with sections: Summary, High-risk issues, Suggestions, Questions.\n\n` +
+      `Diffs:\n\n${patches}`;
 
-    await octokit.request('POST /repos/{owner}/{repo}/issues/{issue_number}/comments', {
+    const { text: outputText, usage } = await callOpenAI({
+      apiKey: openaiApiKey,
+      model: openaiModel,
+      prompt,
+      timeoutMs: 240_000,
+      maxRetries: 3,
+    });
+
+    const marker = '<!-- llm-council-tool -->';
+    const usageLine = usage?.totalTokens
+      ? `Tokens: input ${usage.inputTokens ?? '?'} · output ${usage.outputTokens ?? '?'} · total ${usage.totalTokens}`
+      : undefined;
+
+    const body =
+      `${marker}\n` +
+      `## 🤖 LLM Review (MVP)\n\n` +
+      `Model: \`${openaiModel}\`\n\n` +
+      `${usageLine ? usageLine + '\n\n' : ''}` +
+      outputText;
+
+    // Update existing comment (no spam)
+    const comments = await octokit.request('GET /repos/{owner}/{repo}/issues/{issue_number}/comments', {
       owner,
       repo,
       issue_number: prNumber,
-      body,
+      per_page: 100,
     });
 
-    core.info('Posted PR review comment.');
+    const existing = (comments.data as any[]).find((c) => typeof c?.body === 'string' && c.body.includes(marker));
+
+    if (existing?.id) {
+      await octokit.request('PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}', {
+        owner,
+        repo,
+        comment_id: existing.id,
+        body,
+      });
+      core.info('Updated existing PR review comment.');
+    } else {
+      await octokit.request('POST /repos/{owner}/{repo}/issues/{issue_number}/comments', {
+        owner,
+        repo,
+        issue_number: prNumber,
+        body,
+      });
+      core.info('Posted PR review comment.');
+    }
+
+    core.setOutput('review_markdown', body);
+    core.setOutput('selected_files', String(parts.length));
+
+    await core.summary
+      .addHeading('LLM Council Tool')
+      .addRaw(`Reviewed files: ${parts.length}\n\nModel: ${openaiModel}\n`)
+      .write();
   } catch (err: any) {
     core.setFailed(err?.message || String(err));
   }

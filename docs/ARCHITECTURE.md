@@ -9,14 +9,16 @@ Run multiple specialized "reviewers" (models/roles) on the same change set, then
   - `pipeline.ts` — orchestration: run stages, enforce budgets, gather outputs
   - `scoring.ts` — confidence scoring and deduping
 - `src/lib/`
-  - `openai.ts` — OpenAI adapter (Responses API)
-  - `prompt.ts` — prompt builders per role
-  - `diff.ts` — diff extraction utilities
+  - `openai.ts` — OpenAI adapter (Responses API) + retries + timeouts
+  - `prompt.ts` — prompt builders
+  - `role-prompts.ts` — per-role JSON-only prompts for council stages
+  - `diff.ts` — diff extraction utilities (git)
+  - `diff-pack.ts` — diff splitting/filtering/packing under budgets
 - `src/storage/`
-  - `events.ts` — event types
   - `jsonl.ts` — append-only local logs
 - `src/cli/`
-  - `review.ts` — local runner
+  - `runner.ts` — local single-reviewer runner
+  - `council.ts` — local council runner
   - `feedback.ts` — record accept/reject
   - `agents-gen.ts` — generate AGENTS.md from learned prefs
 

@@ -11,11 +11,20 @@ function normalizeSeverity(s: any): Severity {
   return 'medium';
 }
 
-export function parseStageOutput(text: string, stageId: string): { summary?: string; findings: Finding[]; questions?: string[] } {
+function clampLine(n: any): number | undefined {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return undefined;
+  if (v <= 0) return undefined;
+  return Math.floor(v);
+}
+
+export function parseStageOutput(
+  text: string,
+  stageId: string
+): { ok: boolean; summary?: string; findings: Finding[]; questions?: string[]; raw?: any } {
   const obj = extractFirstJsonObject(text);
   if (!obj || typeof obj !== 'object') {
-    // Fallback to empty results (safe)
-    return { findings: [] };
+    return { ok: false, findings: [] };
   }
 
   const findingsIn: any[] = Array.isArray((obj as any).findings) ? (obj as any).findings : [];
@@ -23,25 +32,28 @@ export function parseStageOutput(text: string, stageId: string): { summary?: str
     .filter((f) => f && typeof f === 'object')
     .map((f, i) => {
       const title = String(f.title || '').trim().slice(0, 120) || `Finding ${i + 1}`;
+      const message = String(f.message || '').trim().slice(0, 5000) || title;
+      const suggestion = f.suggestion ? String(f.suggestion).trim().slice(0, 5000) : undefined;
+
       return {
         id: `${stageId}:${slug(title)}:${i + 1}`,
         title,
         severity: normalizeSeverity(f.severity),
         file: f.file ? String(f.file) : undefined,
-        lineStart: Number.isFinite(f.lineStart) ? Number(f.lineStart) : undefined,
-        lineEnd: Number.isFinite(f.lineEnd) ? Number(f.lineEnd) : undefined,
-        message: String(f.message || '').trim() || title,
-        suggestion: f.suggestion ? String(f.suggestion) : undefined,
+        lineStart: clampLine(f.lineStart),
+        lineEnd: clampLine(f.lineEnd),
+        message,
+        suggestion,
         sourceStage: stageId,
         confidence: 0.55,
       };
     });
 
   const questions: string[] = Array.isArray((obj as any).questions)
-    ? (obj as any).questions.map((q: any) => String(q)).filter(Boolean)
+    ? (obj as any).questions.map((q: any) => String(q)).map((s: string) => s.trim()).filter(Boolean).slice(0, 20)
     : [];
 
-  const summary = typeof (obj as any).summary === 'string' ? (obj as any).summary : undefined;
+  const summary = typeof (obj as any).summary === 'string' ? (obj as any).summary.trim().slice(0, 4000) : undefined;
 
-  return { summary, findings, questions };
+  return { ok: true, summary, findings, questions, raw: obj };
 }

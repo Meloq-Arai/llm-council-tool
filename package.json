@@ -5,20 +5,21 @@
   "description": "GitHub Action: PR review using an LLM",
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/copy-dist.js",
+    "build": "tsc -p tsconfig.json && node scripts/copy-dist.js && node scripts/bundle-action.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "bundle:action": "node scripts/bundle-action.js",
     "review:local": "node dist/runner.js",
     "council:local": "node dist/cli/council.js",
     "feedback": "node dist/cli/feedback.js",
     "agents:gen": "node dist/cli/agents-gen.js"
   },
   "dependencies": {
-    "@actions/core": "^1.11.1",
-    "@actions/github": "^6.0.0",
-    "octokit": "^4.1.0"
+    "@actions/core": "^3.0.0",
+    "@actions/github": "^9.0.0"
   },
   "devDependencies": {
     "@types/node": "^25.2.0",
+    "esbuild": "^0.25.0",
     "typescript": "^5.6.3"
   }
 }

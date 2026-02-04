@@ -2,6 +2,7 @@ import { defaultStages, StageDef } from './stages.js';
 import { CouncilResult, StageOutput } from './types.js';
 import { callOpenAI } from '../lib/openai.js';
 import { buildRolePrompt } from '../lib/role-prompts.js';
+import { packUnifiedDiffForPrompt } from '../lib/diff-pack.js';
 import { mergeAndScoreFindings } from './scoring.js';
 import { parseStageOutput } from './parsing.js';
 
@@ -23,10 +24,30 @@ export async function runCouncil(opts: CouncilRunOptions): Promise<CouncilResult
   const reviewers = stages.filter((s) => s.id !== 'synthesizer');
   const synthesizer = stages.find((s) => s.id === 'synthesizer');
 
+  const packed = packUnifiedDiffForPrompt(opts.diff, {
+    maxFiles: 40,
+    maxCharsPerFile: Math.min(12_000, Math.floor(maxStageChars / 4)),
+    maxTotalChars: maxStageChars,
+  });
+  const diffForStages = packed.text || opts.diff.slice(0, maxStageChars);
+
   for (const s of reviewers) {
-    const prompt = buildRolePrompt(s.role, opts.diff.slice(0, maxStageChars));
-    const rawText = await callOpenAI({ apiKey: opts.apiKey, model: s.model, prompt, timeoutMs: 240_000 });
-    const parsed = parseStageOutput(rawText, s.id);
+    const basePrompt = buildRolePrompt(s.role, diffForStages);
+
+    // First attempt
+    let { text: rawText } = await callOpenAI({ apiKey: opts.apiKey, model: s.model, prompt: basePrompt, timeoutMs: 240_000 });
+    let parsed = parseStageOutput(rawText, s.id);
+
+    // Repair attempt (models occasionally wrap JSON in prose/fences)
+    if (!parsed.ok) {
+      const repairPrompt =
+        `Your previous response was not valid JSON. ` +
+        `Return ONLY valid JSON matching the schema. No markdown, no code fences, no extra text.\n\n` +
+        basePrompt;
+
+      ({ text: rawText } = await callOpenAI({ apiKey: opts.apiKey, model: s.model, prompt: repairPrompt, timeoutMs: 240_000 }));
+      parsed = parseStageOutput(rawText, s.id);
+    }
 
     stageOutputs.push({
       stageId: s.id,
@@ -37,6 +58,7 @@ export async function runCouncil(opts: CouncilRunOptions): Promise<CouncilResult
       meta: {
         summary: parsed.summary,
         questions: parsed.questions,
+        parseOk: parsed.ok,
       },
     });
   }
@@ -61,7 +83,7 @@ export async function runCouncil(opts: CouncilRunOptions): Promise<CouncilResult
       `Include sections:\n- Summary\n- High-risk issues\n- Suggestions\n- Questions\n\n` +
       `Council findings (JSON):\n\n${councilJson}`;
 
-    const rawText = await callOpenAI({ apiKey: opts.apiKey, model: synthesizer.model, prompt: synthPrompt, timeoutMs: 240_000 });
+    const { text: rawText } = await callOpenAI({ apiKey: opts.apiKey, model: synthesizer.model, prompt: synthPrompt, timeoutMs: 240_000 });
 
     stageOutputs.push({
       stageId: synthesizer.id,
