@@ -174,4 +174,53 @@ async function main() {
   }
 }
 
-await main();
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function isTransientError(err: unknown): boolean {
+  const msg = String((err as any)?.message ?? err ?? '');
+  // Network-ish / rate limit / temporary upstream errors.
+  return (
+    /\b(ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND)\b/i.test(msg) ||
+    /\b(429|500|502|503|504)\b/.test(msg) ||
+    /rate limit/i.test(msg) ||
+    /timeout/i.test(msg)
+  );
+}
+
+async function runWithRetries() {
+  const maxAttempts = Number(process.env.LLM_COUNCIL_RETRIES ?? 3);
+  let lastErr: unknown = undefined;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await main();
+      return;
+    } catch (err) {
+      lastErr = err;
+
+      if (!isTransientError(err) || attempt === maxAttempts) {
+        throw err;
+      }
+
+      const backoffMs = Math.min(30_000, 1_000 * Math.pow(2, attempt - 1));
+      core.warning(
+        `Transient error (attempt ${attempt}/${maxAttempts}). Retrying in ${backoffMs}ms: ${String(
+          (err as any)?.message ?? err
+        )}`
+      );
+      await sleep(backoffMs);
+    }
+  }
+
+  throw lastErr;
+}
+
+(async () => {
+  try {
+    await runWithRetries();
+  } catch (err) {
+    core.setFailed(String((err as any)?.stack ?? (err as any)?.message ?? err));
+  }
+})();
