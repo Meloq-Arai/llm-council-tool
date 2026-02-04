@@ -1,15 +1,16 @@
 import { build } from 'esbuild';
 
-// Bundle the GitHub Action entry into dist/index.js including dependencies.
-// This avoids having to ship node_modules in the action repo.
+// Bundle the GitHub Action entry including dependencies.
+// IMPORTANT: output CommonJS (.cjs) so Node can use require() for Node builtins
+// even when the repo uses "type": "module".
 
 await build({
   entryPoints: ['src/index.ts'],
-  outfile: 'dist/index.js',
+  outfile: 'dist/index.cjs',
   bundle: true,
   platform: 'node',
   target: ['node20'],
-  format: 'esm',
+  format: 'cjs',
   sourcemap: false,
   logLevel: 'info',
 });
