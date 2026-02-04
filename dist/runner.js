@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { getGitDiff } from './lib/diff.js';
+import { packUnifiedDiffForPrompt } from './lib/diff-pack.js';
 import { buildReviewPrompt } from './lib/prompt.js';
 import { callOpenAI } from './lib/openai.js';
 function getArg(name) {
@@ -19,13 +20,22 @@ async function main() {
         console.error('Missing OPENAI_API_KEY env var');
         process.exit(2);
     }
-    const diff = getGitDiff({ cwd: repoPath, baseRef: base, headRef: head, maxChars: 120_000 });
+    const diff = getGitDiff({ cwd: repoPath, baseRef: base, headRef: head, maxChars: 200_000 });
     if (!diff.trim()) {
         console.log('No diff.');
         return;
     }
-    const prompt = buildReviewPrompt(diff, { repoName: repoPath });
-    const out = await callOpenAI({ apiKey, model, prompt, timeoutMs: 180_000 });
+    const packed = packUnifiedDiffForPrompt(diff, {
+        maxFiles: 25,
+        maxCharsPerFile: 6000,
+        maxTotalChars: 120_000,
+    });
+    const diffForPrompt = packed.text || diff.slice(0, 120_000);
+    const prompt = buildReviewPrompt(diffForPrompt, {
+        repoName: repoPath,
+        instructions: packed.truncated ? 'Note: diff was truncated to fit a safe budget.' : undefined,
+    });
+    const { text: out } = await callOpenAI({ apiKey, model, prompt, timeoutMs: 180_000 });
     const outDir = getArg('out') || path.resolve(process.cwd(), 'out');
     fs.mkdirSync(outDir, { recursive: true });
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
