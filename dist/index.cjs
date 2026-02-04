@@ -1048,14 +1048,14 @@ var require_util = __commonJS({
         }
         const port = url.port != null ? url.port : url.protocol === "https:" ? 443 : 80;
         let origin = url.origin != null ? url.origin : `${url.protocol || ""}//${url.hostname || ""}:${port}`;
-        let path = url.path != null ? url.path : `${url.pathname || ""}${url.search || ""}`;
+        let path2 = url.path != null ? url.path : `${url.pathname || ""}${url.search || ""}`;
         if (origin[origin.length - 1] === "/") {
           origin = origin.slice(0, origin.length - 1);
         }
-        if (path && path[0] !== "/") {
-          path = `/${path}`;
+        if (path2 && path2[0] !== "/") {
+          path2 = `/${path2}`;
         }
-        return new URL(`${origin}${path}`);
+        return new URL(`${origin}${path2}`);
       }
       if (!isHttpOrHttpsPrefixed(url.origin || url.protocol)) {
         throw new InvalidArgumentError("Invalid URL protocol: the URL must start with `http:` or `https:`.");
@@ -1506,39 +1506,39 @@ var require_diagnostics = __commonJS({
       });
       diagnosticsChannel.channel("undici:client:sendHeaders").subscribe((evt) => {
         const {
-          request: { method, path, origin }
+          request: { method, path: path2, origin }
         } = evt;
-        debuglog("sending request to %s %s/%s", method, origin, path);
+        debuglog("sending request to %s %s/%s", method, origin, path2);
       });
       diagnosticsChannel.channel("undici:request:headers").subscribe((evt) => {
         const {
-          request: { method, path, origin },
+          request: { method, path: path2, origin },
           response: { statusCode }
         } = evt;
         debuglog(
           "received response to %s %s/%s - HTTP %d",
           method,
           origin,
-          path,
+          path2,
           statusCode
         );
       });
       diagnosticsChannel.channel("undici:request:trailers").subscribe((evt) => {
         const {
-          request: { method, path, origin }
+          request: { method, path: path2, origin }
         } = evt;
-        debuglog("trailers received from %s %s/%s", method, origin, path);
+        debuglog("trailers received from %s %s/%s", method, origin, path2);
       });
       diagnosticsChannel.channel("undici:request:error").subscribe((evt) => {
         const {
-          request: { method, path, origin },
+          request: { method, path: path2, origin },
           error: error2
         } = evt;
         debuglog(
           "request to %s %s/%s errored - %s",
           method,
           origin,
-          path,
+          path2,
           error2.message
         );
       });
@@ -1587,9 +1587,9 @@ var require_diagnostics = __commonJS({
         });
         diagnosticsChannel.channel("undici:client:sendHeaders").subscribe((evt) => {
           const {
-            request: { method, path, origin }
+            request: { method, path: path2, origin }
           } = evt;
-          debuglog("sending request to %s %s/%s", method, origin, path);
+          debuglog("sending request to %s %s/%s", method, origin, path2);
         });
       }
       diagnosticsChannel.channel("undici:websocket:open").subscribe((evt) => {
@@ -1652,7 +1652,7 @@ var require_request = __commonJS({
     var kHandler = Symbol("handler");
     var Request = class {
       constructor(origin, {
-        path,
+        path: path2,
         method,
         body,
         headers,
@@ -1667,11 +1667,11 @@ var require_request = __commonJS({
         expectContinue,
         servername
       }, handler2) {
-        if (typeof path !== "string") {
+        if (typeof path2 !== "string") {
           throw new InvalidArgumentError("path must be a string");
-        } else if (path[0] !== "/" && !(path.startsWith("http://") || path.startsWith("https://")) && method !== "CONNECT") {
+        } else if (path2[0] !== "/" && !(path2.startsWith("http://") || path2.startsWith("https://")) && method !== "CONNECT") {
           throw new InvalidArgumentError("path must be an absolute URL or start with a slash");
-        } else if (invalidPathRegex.test(path)) {
+        } else if (invalidPathRegex.test(path2)) {
           throw new InvalidArgumentError("invalid request path");
         }
         if (typeof method !== "string") {
@@ -1734,7 +1734,7 @@ var require_request = __commonJS({
         this.completed = false;
         this.aborted = false;
         this.upgrade = upgrade || null;
-        this.path = query ? buildURL(path, query) : path;
+        this.path = query ? buildURL(path2, query) : path2;
         this.origin = origin;
         this.idempotent = idempotent == null ? method === "HEAD" || method === "GET" : idempotent;
         this.blocking = blocking == null ? false : blocking;
@@ -6247,7 +6247,7 @@ var require_client_h1 = __commonJS({
       return method !== "GET" && method !== "HEAD" && method !== "OPTIONS" && method !== "TRACE" && method !== "CONNECT";
     }
     function writeH1(client, request2) {
-      const { method, path, host, upgrade, blocking, reset } = request2;
+      const { method, path: path2, host, upgrade, blocking, reset } = request2;
       let { body, headers, contentLength } = request2;
       const expectsPayload = method === "PUT" || method === "POST" || method === "PATCH" || method === "QUERY" || method === "PROPFIND" || method === "PROPPATCH";
       if (util.isFormDataLike(body)) {
@@ -6313,7 +6313,7 @@ var require_client_h1 = __commonJS({
       if (blocking) {
         socket[kBlocking] = true;
       }
-      let header = `${method} ${path} HTTP/1.1\r
+      let header = `${method} ${path2} HTTP/1.1\r
 `;
       if (typeof host === "string") {
         header += `host: ${host}\r
@@ -6839,7 +6839,7 @@ var require_client_h2 = __commonJS({
     }
     function writeH2(client, request2) {
       const session = client[kHTTP2Session];
-      const { method, path, host, upgrade, expectContinue, signal, headers: reqHeaders } = request2;
+      const { method, path: path2, host, upgrade, expectContinue, signal, headers: reqHeaders } = request2;
       let { body } = request2;
       if (upgrade) {
         util.errorRequest(client, request2, new Error("Upgrade not supported for H2"));
@@ -6906,7 +6906,7 @@ var require_client_h2 = __commonJS({
         });
         return true;
       }
-      headers[HTTP2_HEADER_PATH] = path;
+      headers[HTTP2_HEADER_PATH] = path2;
       headers[HTTP2_HEADER_SCHEME] = "https";
       const expectsPayload = method === "PUT" || method === "POST" || method === "PATCH";
       if (body && typeof body.read === "function") {
@@ -7259,9 +7259,9 @@ var require_redirect_handler = __commonJS({
           return this.handler.onHeaders(statusCode, headers, resume, statusText);
         }
         const { origin, pathname, search } = util.parseURL(new URL(this.location, this.opts.origin && new URL(this.opts.path, this.opts.origin)));
-        const path = search ? `${pathname}${search}` : pathname;
+        const path2 = search ? `${pathname}${search}` : pathname;
         this.opts.headers = cleanRequestHeaders(this.opts.headers, statusCode === 303, this.opts.origin !== origin);
-        this.opts.path = path;
+        this.opts.path = path2;
         this.opts.origin = origin;
         this.opts.maxRedirections = 0;
         this.opts.query = null;
@@ -8495,10 +8495,10 @@ var require_proxy_agent = __commonJS({
         };
         const {
           origin,
-          path = "/",
+          path: path2 = "/",
           headers = {}
         } = opts;
-        opts.path = origin + path;
+        opts.path = origin + path2;
         if (!("host" in headers) && !("Host" in headers)) {
           const { host } = new URL2(origin);
           headers.host = host;
@@ -10419,20 +10419,20 @@ var require_mock_utils = __commonJS({
       }
       return true;
     }
-    function safeUrl(path) {
-      if (typeof path !== "string") {
-        return path;
+    function safeUrl(path2) {
+      if (typeof path2 !== "string") {
+        return path2;
       }
-      const pathSegments = path.split("?");
+      const pathSegments = path2.split("?");
       if (pathSegments.length !== 2) {
-        return path;
+        return path2;
       }
       const qp = new URLSearchParams(pathSegments.pop());
       qp.sort();
       return [...pathSegments, qp.toString()].join("?");
     }
-    function matchKey(mockDispatch2, { path, method, body, headers }) {
-      const pathMatch = matchValue(mockDispatch2.path, path);
+    function matchKey(mockDispatch2, { path: path2, method, body, headers }) {
+      const pathMatch = matchValue(mockDispatch2.path, path2);
       const methodMatch = matchValue(mockDispatch2.method, method);
       const bodyMatch = typeof mockDispatch2.body !== "undefined" ? matchValue(mockDispatch2.body, body) : true;
       const headersMatch = matchHeaders(mockDispatch2, headers);
@@ -10454,7 +10454,7 @@ var require_mock_utils = __commonJS({
     function getMockDispatch(mockDispatches, key) {
       const basePath = key.query ? buildURL(key.path, key.query) : key.path;
       const resolvedPath = typeof basePath === "string" ? safeUrl(basePath) : basePath;
-      let matchedMockDispatches = mockDispatches.filter(({ consumed }) => !consumed).filter(({ path }) => matchValue(safeUrl(path), resolvedPath));
+      let matchedMockDispatches = mockDispatches.filter(({ consumed }) => !consumed).filter(({ path: path2 }) => matchValue(safeUrl(path2), resolvedPath));
       if (matchedMockDispatches.length === 0) {
         throw new MockNotMatchedError(`Mock dispatch not matched for path '${resolvedPath}'`);
       }
@@ -10492,9 +10492,9 @@ var require_mock_utils = __commonJS({
       }
     }
     function buildKey(opts) {
-      const { path, method, body, headers, query } = opts;
+      const { path: path2, method, body, headers, query } = opts;
       return {
-        path,
+        path: path2,
         method,
         body,
         headers,
@@ -10957,10 +10957,10 @@ var require_pending_interceptors_formatter = __commonJS({
       }
       format(pendingInterceptors) {
         const withPrettyHeaders = pendingInterceptors.map(
-          ({ method, path, data: { statusCode }, persist, times, timesInvoked, origin }) => ({
+          ({ method, path: path2, data: { statusCode }, persist, times, timesInvoked, origin }) => ({
             Method: method,
             Origin: origin,
-            Path: path,
+            Path: path2,
             "Status code": statusCode,
             Persistent: persist ? PERSISTENT : NOT_PERSISTENT,
             Invocations: timesInvoked,
@@ -15841,9 +15841,9 @@ var require_util6 = __commonJS({
         }
       }
     }
-    function validateCookiePath(path) {
-      for (let i = 0; i < path.length; ++i) {
-        const code = path.charCodeAt(i);
+    function validateCookiePath(path2) {
+      for (let i = 0; i < path2.length; ++i) {
+        const code = path2.charCodeAt(i);
         if (code < 32 || // exclude CTLs (0-31)
         code === 127 || // DEL
         code === 59) {
@@ -18437,11 +18437,11 @@ var require_undici = __commonJS({
           if (typeof opts.path !== "string") {
             throw new InvalidArgumentError("invalid opts.path");
           }
-          let path = opts.path;
+          let path2 = opts.path;
           if (!opts.path.startsWith("/")) {
-            path = `/${path}`;
+            path2 = `/${path2}`;
           }
-          url = new URL(util.parseOrigin(url).origin + path);
+          url = new URL(util.parseOrigin(url).origin + path2);
         } else {
           if (!opts) {
             opts = typeof url === "object" ? url : {};
@@ -19890,8 +19890,8 @@ var Context = class {
       if ((0, import_fs2.existsSync)(process.env.GITHUB_EVENT_PATH)) {
         this.payload = JSON.parse((0, import_fs2.readFileSync)(process.env.GITHUB_EVENT_PATH, { encoding: "utf8" }));
       } else {
-        const path = process.env.GITHUB_EVENT_PATH;
-        process.stdout.write(`GITHUB_EVENT_PATH ${path} does not exist${import_os3.EOL}`);
+        const path2 = process.env.GITHUB_EVENT_PATH;
+        process.stdout.write(`GITHUB_EVENT_PATH ${path2} does not exist${import_os3.EOL}`);
       }
     }
     this.eventName = process.env.GITHUB_EVENT_NAME;
@@ -23501,6 +23501,10 @@ function getOctokit(token, options, ...additionalPlugins) {
   return new GitHubWithPlugins(getOctokitOptions(token, options));
 }
 
+// src/index.ts
+var import_promises = __toESM(require("node:fs/promises"), 1);
+var import_node_path = __toESM(require("node:path"), 1);
+
 // src/lib/openai.ts
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -23597,62 +23601,93 @@ function shouldReviewFile(f) {
   if (f.additions + f.deletions < 10) return false;
   return true;
 }
+function sleep2(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+function isTransientError(err) {
+  const msg = String(err?.message ?? err ?? "");
+  return /\b(ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND)\b/i.test(msg) || /\b(429|500|502|503|504)\b/.test(msg) || /rate limit/i.test(msg) || /timeout/i.test(msg);
+}
+async function writeOutputs(params) {
+  const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
+  const outDirAbs = import_node_path.default.isAbsolute(params.outputDir) ? params.outputDir : import_node_path.default.join(workspace, params.outputDir);
+  await import_promises.default.mkdir(outDirAbs, { recursive: true });
+  const reviewPath = import_node_path.default.join(outDirAbs, "review.md");
+  const promptPath = import_node_path.default.join(outDirAbs, "prompt.txt");
+  const diffPath = import_node_path.default.join(outDirAbs, "diff.txt");
+  const metaPath = import_node_path.default.join(outDirAbs, "meta.json");
+  await Promise.all([
+    import_promises.default.writeFile(reviewPath, params.markerBody, "utf8"),
+    import_promises.default.writeFile(promptPath, params.prompt, "utf8"),
+    import_promises.default.writeFile(diffPath, params.patches, "utf8"),
+    import_promises.default.writeFile(metaPath, JSON.stringify(params.meta, null, 2), "utf8")
+  ]);
+  setOutput("review_path", import_node_path.default.relative(workspace, reviewPath));
+  setOutput("prompt_path", import_node_path.default.relative(workspace, promptPath));
+  setOutput("diff_path", import_node_path.default.relative(workspace, diffPath));
+  setOutput("meta_path", import_node_path.default.relative(workspace, metaPath));
+}
 async function main() {
-  try {
-    const ghToken = getInput("github_token") || process.env.GITHUB_TOKEN;
-    if (!ghToken) throw new Error("GitHub token is missing (github_token input / GITHUB_TOKEN env)");
-    const openaiApiKey = getInput("openai_api_key", { required: true });
-    const openaiModel = getInput("openai_model") || "gpt-4.1-mini";
-    const maxFiles = Number(getInput("max_files") || "25");
-    const maxPatchChars = Number(getInput("max_patch_chars") || "6000");
-    const maxTotalChars = Number(getInput("max_total_chars") || "120000");
-    const ctx = context2;
-    if (ctx.eventName !== "pull_request" && ctx.eventName !== "pull_request_target") {
-      info(`Skipping: event ${ctx.eventName} not supported.`);
-      return;
-    }
-    const pr = ctx.payload.pull_request;
-    if (!pr) throw new Error("No pull_request in context payload");
-    const { owner, repo } = ctx.repo;
-    const prNumber = pr.number;
-    const octokit = getOctokit(ghToken);
-    const files = [];
-    let page = 1;
-    while (true) {
-      const res = await octokit.request("GET /repos/{owner}/{repo}/pulls/{pull_number}/files", {
-        owner,
-        repo,
-        pull_number: prNumber,
-        per_page: 100,
-        page
-      });
-      const batch = res.data;
-      if (!batch.length) break;
-      for (const f of batch) files.push(f);
-      if (batch.length < 100) break;
-      page++;
-    }
-    const selected = files.filter(shouldReviewFile).slice(0, maxFiles);
-    if (!selected.length) {
-      info("No files selected for review.");
-      return;
-    }
-    const parts = [];
-    let total = 0;
-    for (const f of selected) {
-      const patch = (f.patch || "").slice(0, maxPatchChars);
-      const block = `FILE: ${f.filename}
+  const ghToken = getInput("github_token") || process.env.GITHUB_TOKEN;
+  if (!ghToken) throw new Error("GitHub token is missing (github_token input / GITHUB_TOKEN env)");
+  const openaiApiKey = getInput("openai_api_key", { required: true });
+  const openaiModel = getInput("openai_model") || "gpt-4.1-mini";
+  const maxFiles = Number(getInput("max_files") || "25");
+  const maxPatchChars = Number(getInput("max_patch_chars") || "6000");
+  const maxTotalChars = Number(getInput("max_total_chars") || "120000");
+  const outputDir = getInput("output_dir") || ".llm-council-tool";
+  const writeFiles = (getInput("write_files") || "true").toLowerCase() !== "false";
+  const ctx = context2;
+  if (ctx.eventName !== "pull_request" && ctx.eventName !== "pull_request_target") {
+    info(`Skipping: event ${ctx.eventName} not supported.`);
+    return;
+  }
+  const pr = ctx.payload.pull_request;
+  if (!pr) throw new Error("No pull_request in context payload");
+  const { owner, repo } = ctx.repo;
+  const prNumber = pr.number;
+  const octokit = getOctokit(ghToken);
+  const files = [];
+  let page = 1;
+  while (true) {
+    const res = await octokit.request("GET /repos/{owner}/{repo}/pulls/{pull_number}/files", {
+      owner,
+      repo,
+      pull_number: prNumber,
+      per_page: 100,
+      page
+    });
+    const batch = res.data;
+    if (!batch.length) break;
+    for (const f of batch) files.push(f);
+    if (batch.length < 100) break;
+    page++;
+  }
+  const selected = files.filter(shouldReviewFile).slice(0, maxFiles);
+  if (!selected.length) {
+    info("No files selected for review.");
+    return;
+  }
+  const parts = [];
+  let total = 0;
+  let truncated = false;
+  for (const f of selected) {
+    const patch = (f.patch || "").slice(0, maxPatchChars);
+    const block = `FILE: ${f.filename}
 STATUS: ${f.status}
 CHANGES: +${f.additions}/-${f.deletions}
 PATCH:
 ${patch || "[no patch provided by GitHub]"}
 `;
-      if (total + block.length > maxTotalChars) break;
-      parts.push(block);
-      total += block.length;
+    if (total + block.length > maxTotalChars) {
+      truncated = true;
+      break;
     }
-    const patches = parts.join("\n---\n");
-    const prompt = `You are a senior code reviewer. Review the following GitHub PR diffs.
+    parts.push(block);
+    total += block.length;
+  }
+  const patches = parts.join("\n---\n");
+  const prompt = `You are a senior code reviewer. Review the following GitHub PR diffs.
 
 Rules:
 - Be concise and specific.
@@ -23663,61 +23698,75 @@ Rules:
 Diffs:
 
 ${patches}`;
-    const { text: outputText, usage } = await callOpenAI({
-      apiKey: openaiApiKey,
-      model: openaiModel,
-      prompt,
-      timeoutMs: 24e4,
-      maxRetries: 3
-    });
-    const marker = "<!-- llm-council-tool -->";
-    const usageLine = usage?.totalTokens ? `Tokens: input ${usage.inputTokens ?? "?"} \xB7 output ${usage.outputTokens ?? "?"} \xB7 total ${usage.totalTokens}` : void 0;
-    const body = `${marker}
+  const { text: outputText, usage } = await callOpenAI({
+    apiKey: openaiApiKey,
+    model: openaiModel,
+    prompt,
+    timeoutMs: 24e4,
+    maxRetries: 3
+  });
+  const marker = "<!-- llm-council-tool -->";
+  const usageLine = usage?.totalTokens ? `Tokens: input ${usage.inputTokens ?? "?"} \xB7 output ${usage.outputTokens ?? "?"} \xB7 total ${usage.totalTokens}` : void 0;
+  const body = `${marker}
 ## \u{1F916} LLM Review (MVP)
 
 Model: \`${openaiModel}\`
 
-${usageLine ? usageLine + "\n\n" : ""}` + outputText;
-    const comments = await octokit.request("GET /repos/{owner}/{repo}/issues/{issue_number}/comments", {
+${usageLine ? usageLine + "\n\n" : ""}` + (truncated ? `> Note: diff truncated to fit budget (max_total_chars=${maxTotalChars}).
+
+` : "") + outputText;
+  const comments = await octokit.request("GET /repos/{owner}/{repo}/issues/{issue_number}/comments", {
+    owner,
+    repo,
+    issue_number: prNumber,
+    per_page: 100
+  });
+  const existing = comments.data.find((c) => typeof c?.body === "string" && c.body.includes(marker));
+  if (existing?.id) {
+    await octokit.request("PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}", {
+      owner,
+      repo,
+      comment_id: existing.id,
+      body
+    });
+    info("Updated existing PR review comment.");
+  } else {
+    await octokit.request("POST /repos/{owner}/{repo}/issues/{issue_number}/comments", {
       owner,
       repo,
       issue_number: prNumber,
-      per_page: 100
+      body
     });
-    const existing = comments.data.find((c) => typeof c?.body === "string" && c.body.includes(marker));
-    if (existing?.id) {
-      await octokit.request("PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}", {
-        owner,
-        repo,
-        comment_id: existing.id,
-        body
-      });
-      info("Updated existing PR review comment.");
-    } else {
-      await octokit.request("POST /repos/{owner}/{repo}/issues/{issue_number}/comments", {
-        owner,
-        repo,
-        issue_number: prNumber,
-        body
-      });
-      info("Posted PR review comment.");
-    }
-    setOutput("review_markdown", body);
-    setOutput("selected_files", String(parts.length));
-    await summary.addHeading("LLM Council Tool").addRaw(`Reviewed files: ${parts.length}
+    info("Posted PR review comment.");
+  }
+  setOutput("review_markdown", body);
+  setOutput("selected_files", String(parts.length));
+  setOutput("selected_filenames", JSON.stringify(selected.slice(0, parts.length).map((f) => f.filename)));
+  const meta = {
+    schemaVersion: 1,
+    repo: { owner, repo },
+    prNumber,
+    model: openaiModel,
+    usage,
+    budgets: { maxFiles, maxPatchChars, maxTotalChars },
+    selectedFiles: selected.slice(0, parts.length).map((f) => ({
+      filename: f.filename,
+      additions: f.additions,
+      deletions: f.deletions,
+      status: f.status
+    })),
+    truncated,
+    createdAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  if (writeFiles) {
+    await writeOutputs({ outputDir, markerBody: body, prompt, patches, meta });
+  }
+  await summary.addHeading("LLM Council Tool").addRaw(`Reviewed files: ${parts.length}
 
 Model: ${openaiModel}
-`).write();
-  } catch (err) {
-    setFailed(err?.message || String(err));
-  }
-}
-function sleep2(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-function isTransientError(err) {
-  const msg = String(err?.message ?? err ?? "");
-  return /\b(ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND)\b/i.test(msg) || /\b(429|500|502|503|504)\b/.test(msg) || /rate limit/i.test(msg) || /timeout/i.test(msg);
+`).addRaw(writeFiles ? `
+Wrote outputs to: ${outputDir}
+` : "").write();
 }
 async function runWithRetries() {
   const maxAttempts = Number(process.env.LLM_COUNCIL_RETRIES ?? 3);

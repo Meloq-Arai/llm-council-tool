@@ -1,0 +1,13 @@
+{
+  "name": "Stride PR #2 bench.ts seeded issues",
+  "categories": [
+    "UNSAFE_JSON_PARSE",
+    "LOOSE_EQUALITY",
+    "DYNAMIC_EVAL",
+    "REGEX_REDOS",
+    "MISSING_AWAIT",
+    "ANY_TYPING",
+    "PATH_TRAVERSAL_READ",
+    "WEAK_RANDOMNESS"
+  ]
+}
