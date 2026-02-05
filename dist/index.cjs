@@ -24399,6 +24399,7 @@ async function main() {
   const ghToken = getInput("github_token") || process.env.GITHUB_TOKEN;
   if (!ghToken) throw new Error("GitHub token is missing (github_token input / GITHUB_TOKEN env)");
   const defaultProvider = getInput("llm_provider") || "github-models";
+  const ghModelsPreset = (getInput("github_models_preset") || "off").trim().toLowerCase();
   const openaiApiKey = getInput("openai_api_key") || process.env.OPENAI_API_KEY;
   const googleApiKey = getInput("google_api_key") || process.env.GOOGLE_API_KEY;
   const reviewModelsRaw = parseCsvList(getInput("review_models"));
@@ -24514,12 +24515,31 @@ ${red.text || "[no patch provided by GitHub]"}
     return names.map((n) => nameMap.get(String(n).toLowerCase()) ?? n);
   };
   const reviewersSpecs = [];
-  const reviewerItems = reviewModelsRaw.length ? reviewModelsRaw : ["gpt-4o", "Meta-Llama-3.1-405B-Instruct", "gpt-4o-mini"];
+  let reviewerItems = reviewModelsRaw.length ? reviewModelsRaw : ["gpt-4o", "Meta-Llama-3.1-405B-Instruct", "Mistral-Nemo"];
+  let judgeModel = judgeModelRaw || "gpt-4o";
+  let verifierModel = verifierModelRaw || "gpt-4o-mini";
+  if (defaultProvider === "github-models" && ghModelsPreset !== "off") {
+    if (ghModelsPreset === "fast") {
+      reviewerItems = ["gpt-4o-mini", "Mistral-Nemo", "gpt-4o-mini"];
+      judgeModel = "gpt-4o-mini";
+      verifierModel = "gpt-4o-mini";
+    } else if (ghModelsPreset === "balanced") {
+      reviewerItems = ["gpt-4o", "Meta-Llama-3.1-405B-Instruct", "Mistral-Nemo"];
+      judgeModel = "gpt-4o";
+      verifierModel = "gpt-4o-mini";
+    } else if (ghModelsPreset === "gpt5") {
+      reviewerItems = ["gpt-5.2", "gpt-4o", "Mistral-Nemo"];
+      judgeModel = "gpt-5.2";
+      verifierModel = "gpt-4o";
+    } else {
+      warning(`Unknown github_models_preset=${ghModelsPreset}; ignoring.`);
+    }
+  }
   let reviewerModelsResolved = reviewerItems;
   if (defaultProvider === "github-models") reviewerModelsResolved = await resolveForGithubModels(reviewerModelsResolved);
   for (const r of reviewerModelsResolved) reviewersSpecs.push(parseModelSpec(r, defaultProvider));
-  let judgeSpec = parseModelSpec(judgeModelRaw, defaultProvider);
-  let verifierSpec = parseModelSpec(verifierModelRaw, defaultProvider);
+  let judgeSpec = parseModelSpec(judgeModel, defaultProvider);
+  let verifierSpec = parseModelSpec(verifierModel, defaultProvider);
   let verifier2Spec = verifier2ModelRaw ? parseModelSpec(verifier2ModelRaw, defaultProvider) : void 0;
   let criticSpec = criticModelRaw ? parseModelSpec(criticModelRaw, defaultProvider) : void 0;
   if (defaultProvider === "github-models") {

@@ -44,6 +44,12 @@ inputs:
     description: "Optional critic self-check model to prune weak/unsupported issues."
     required: false
 
+  # Routing presets (optional)
+  github_models_preset:
+    description: "Optional presets for GitHub Models routing. Values: off | fast | balanced | gpt5"
+    required: false
+    default: "off"
+
   # Budgets
   max_files:
     description: "Max files to review"
