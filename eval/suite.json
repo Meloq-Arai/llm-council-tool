@@ -1,0 +1,32 @@
+{
+  "cases": [
+    {
+      "name": "seeded",
+      "repo": "Meloq-Arai/Stride",
+      "workflow": "LLM Review",
+      "branch": "llm-council-eval",
+      "expect": {
+        "minConfirmed": 6
+      }
+    },
+    {
+      "name": "clean",
+      "repo": "Meloq-Arai/Stride",
+      "workflow": "LLM Review",
+      "branch": "llm-council-eval-clean",
+      "expect": {
+        "maxConfirmed": 1,
+        "maxSeverity": "low"
+      }
+    },
+    {
+      "name": "large",
+      "repo": "Meloq-Arai/Stride",
+      "workflow": "LLM Review",
+      "branch": "llm-council-eval-large",
+      "expect": {
+        "maxCritical": 0
+      }
+    }
+  ]
+}
