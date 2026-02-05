@@ -23988,8 +23988,9 @@ function normalizeIssue(x, idx) {
       end: Number(x.line_range.end ?? x.line_range.to ?? x.line_range.start ?? 0) || 0,
       side: x.line_range.side === "LEFT" ? "LEFT" : "RIGHT"
     } : void 0,
-    why_this_matters: String(x.why_this_matters || x.why || ""),
     description: String(x.description || ""),
+    why_this_matters: String(x.why_this_matters || x.why || "").trim() || // fallback: first sentence of description
+    String(x.description || "").trim().split(/\n|\.|\!/)[0].trim(),
     evidence: String(x.evidence || ""),
     suggestion: String(x.suggestion || ""),
     confidence: clamp01(x.confidence),
@@ -24014,8 +24015,11 @@ async function callStage(cfg, label, spec, messages) {
 async function runCouncil(cfg) {
   const usage = {};
   const reviewerSystem = `You are a top-tier senior software engineer doing PR review.
-Find high-signal problems (correctness, security, edge cases, maintainability).
+Find ONLY high-signal problems (correctness, security, edge cases, maintainability).
+Avoid low-value nitpicks (style, personal preferences, "add logging", "add try/catch everywhere", "add runtime type checks" in TypeScript) unless there is a clear bug/security risk.
+Assume this is a PR review: report issues that would realistically matter in production.
 You MUST quote exact evidence from the diff for every issue.
+"why_this_matters" MUST be non-empty.
 
 Output JSON ONLY (no markdown, no code fences).
 Schema: {"schemaVersion":1,"issues":[{"issue_id":string,"title":string,"severity":"critical"|"high"|"medium"|"low","category":string,"file":string,"line_range":{"start":number,"end":number,"side":"RIGHT"|"LEFT"},"why_this_matters":string,"description":string,"evidence":string,"suggestion":string,"risk":number,"fix_effort":"xs"|"s"|"m"|"l"}]}`;
@@ -24056,8 +24060,10 @@ ${stageDiffFor(spec)}`;
     throw new Error(`Not enough reviewer models available (got ${usedReviewers.length}).`);
   }
   const judgeSystem = `You are the judge. Dedupe and consolidate reviewer issues.
-Remove weak / unsupported / repetitive items.
+Remove weak / unsupported / repetitive / nitpicky items.
+Do NOT include suggestions like "add logging" or "add try/catch" unless it prevents a real bug or security issue.
 Every issue MUST include exact evidence quoted from diff.
+Every issue MUST include non-empty why_this_matters.
 
 Output JSON ONLY. SchemaVersion=1. issues[].issue_id must be stable short ids (I1,I2,...).
 Return up to 25 issues.`;
@@ -24102,8 +24108,9 @@ ${JSON.stringify(judgeJson, null, 2)}`;
   }
   const judgeIssuesRaw = safeArray(judgeJson?.issues).slice(0, 25);
   const judgeIssues = judgeIssuesRaw.map(normalizeIssue);
-  const verifierSystem = `You are a confidence checker. For each issue, verify it against the diff.
-If not clearly supported, mark unconfirmed with low confidence.
+  const verifierSystem = `You are a strict confidence checker. For each issue, verify it against the diff.
+If not clearly supported by the diff, mark unconfirmed with low confidence.
+If the issue is a nitpick / preference / hypothetical (logging, extra try/catch, runtime type checks in TS), mark it unconfirmed unless the diff shows a concrete failure mode.
 You MUST quote evidence from the diff in your response.
 
 Output JSON ONLY: {"schemaVersion":1,"results":[{"issue_id":string,"confirmed":boolean,"confidence":number,"note":string,"evidence":string}]}`;
