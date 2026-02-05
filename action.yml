@@ -1,35 +1,48 @@
 name: "LLM Council Tool"
-description: "Reviews GitHub pull requests using an LLM council (multiple models + judge + confidence check) and posts feedback."
+description: "Reviews GitHub pull requests using an LLM council (multi-model + judge + confidence checker) and posts feedback."
 author: "Kimeo + Clawd"
 
 inputs:
   github_token:
-    description: "GitHub token for API access (usually github.token). Also used for GitHub Models auth when llm_provider=github-models."
+    description: "GitHub token for API access (usually github.token). Required for PR API + GitHub Models auth."
     required: false
 
   llm_provider:
-    description: "LLM provider: github-models (Copilot/GitHub Models) or openai (API key)."
+    description: "Default provider for model specs without a prefix: github-models | openai | google"
     required: false
     default: "github-models"
 
-  # OpenAI (only used when llm_provider=openai)
+  # Providers keys (only required if you use those providers)
   openai_api_key:
-    description: "OpenAI API key (required when llm_provider=openai)."
+    description: "OpenAI API key (required when using provider=openai)"
+    required: false
+  openai_model:
+    description: "DEPRECATED (legacy input). Use judge_model/verifier_model/review_models instead."
+    required: false
+  google_api_key:
+    description: "Google Gemini API key (required when using provider=google)"
     required: false
 
-  # Model selection
+  # Model routing
+  # You can prefix any entry with provider, e.g. google:gemini-3-pro or github-models:gpt-5
   review_models:
-    description: "Comma-separated list of 3 reviewer models. Example: gpt-4o,Meta-Llama-3.1-405B-Instruct,Mistral-large-2407"
+    description: "Comma-separated reviewer models (3 used)."
     required: false
-    default: "gpt-4o,Meta-Llama-3.1-405B-Instruct,Mistral-large-2407"
+    default: "gpt-4o,Meta-Llama-3.1-405B-Instruct,Mistral-Nemo"
   judge_model:
     description: "Judge model (dedupe + synthesize)."
     required: false
     default: "gpt-4o"
   verifier_model:
-    description: "Confidence checker model (validates findings against diff)."
+    description: "Confidence checker model."
     required: false
     default: "gpt-4o-mini"
+  verifier2_model:
+    description: "Optional second verifier for cross-checking (cheap model recommended)."
+    required: false
+  critic_model:
+    description: "Optional critic self-check model to prune weak/unsupported issues."
+    required: false
 
   # Budgets
   max_files:
@@ -37,7 +50,7 @@ inputs:
     required: false
     default: "25"
   max_patch_chars:
-    description: "Max characters of patch to send per file"
+    description: "Max patch characters per file"
     required: false
     default: "6000"
   max_total_chars:
@@ -46,18 +59,27 @@ inputs:
     default: "120000"
 
   min_confidence:
-    description: "Minimum confidence (0..1) required to surface a finding as confirmed."
+    description: "Minimum confidence (0..1) required to surface a finding as confirmed"
     required: false
-    default: "0.55"
+    default: "0.6"
 
   output_dir:
     description: "Directory (relative to GITHUB_WORKSPACE) to write review outputs"
     required: false
-    default: ".llm-council-tool"
+    default: "llm-council-tool-out"
   write_files:
     description: "If false, do not write output files"
     required: false
     default: "true"
+
+  add_labels:
+    description: "If true, apply labels derived from confirmed issues"
+    required: false
+    default: "true"
+  add_inline_comments:
+    description: "If true, attempt PR inline review comments for issues with a line_range"
+    required: false
+    default: "false"
 
 runs:
   using: "node20"

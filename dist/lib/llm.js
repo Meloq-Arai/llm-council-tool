@@ -1,5 +1,6 @@
 import { callOpenAI } from './openai.js';
 import { callGithubModels } from './github-models.js';
+import { callGemini } from './google-gemini.js';
 export async function callLLM(req) {
     const timeoutMs = req.timeoutMs;
     const maxRetries = req.maxRetries;
@@ -50,6 +51,20 @@ export async function callLLM(req) {
             maxTokens: req.maxTokens,
         });
         return r;
+    }
+    if (req.provider === 'google') {
+        if (!req.googleApiKey)
+            throw new Error('googleApiKey is required for provider=google');
+        const messages = req.messages ?? (req.prompt ? [{ role: 'user', content: req.prompt }] : undefined);
+        if (!messages)
+            throw new Error('Either messages or prompt is required for provider=google');
+        const r = await callGemini({
+            apiKey: req.googleApiKey,
+            model: req.model,
+            messages,
+            timeoutMs,
+        });
+        return { text: r.text, raw: r.raw };
     }
     // exhaustive
     throw new Error(`Unknown provider: ${req.provider}`);
