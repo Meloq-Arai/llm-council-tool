@@ -23977,9 +23977,9 @@ ${patch || "[no patch provided by GitHub]"}
       for (const f of fallbackPool) add(canonicalize(f));
       return out.slice(0, count);
     };
-    resolvedReviewModels = pick(reviewModels, 3);
-    resolvedJudgeModel = canonicalize(judgeModel) ?? pick([judgeModel], 1)[0] ?? "gpt-4o";
-    resolvedVerifierModel = canonicalize(verifierModel) ?? pick([verifierModel], 1)[0] ?? "gpt-4o-mini";
+    resolvedReviewModels = pick(reviewModels, 8);
+    resolvedJudgeModel = canonicalize(judgeModel) ?? pick([judgeModel], 2)[0] ?? "gpt-4o";
+    resolvedVerifierModel = canonicalize(verifierModel) ?? pick([verifierModel], 2)[0] ?? "gpt-4o-mini";
     info(
       `Resolved GitHub Models: reviewers=[${resolvedReviewModels.join(", ")}], judge=${resolvedJudgeModel}, verifier=${resolvedVerifierModel}`
     );
@@ -24021,19 +24021,35 @@ Schema:
 
 ${diffText}`;
   const reviewerResults = [];
-  const models3 = resolvedReviewModels.length ? resolvedReviewModels.slice(0, 3) : ["gpt-4o", "Meta-Llama-3.1-405B-Instruct", "gpt-4o-mini"];
-  for (let i = 0; i < models3.length; i++) {
-    const model = models3[i];
-    const r = await call(
-      model,
-      [
-        { role: "system", content: reviewerSystem },
-        { role: "user", content: reviewerUser }
-      ],
-      `reviewer_${i + 1}_${model}`
+  const reviewerCandidates = resolvedReviewModels.length ? resolvedReviewModels : ["gpt-4o", "Meta-Llama-3.1-405B-Instruct", "gpt-4o-mini"];
+  const models3 = [];
+  const isUnknownModel = (e) => /unknown_model/i.test(String(e?.message ?? e ?? "")) || /"code"\s*:\s*"unknown_model"/i.test(String(e?.message ?? ""));
+  for (const candidate of reviewerCandidates) {
+    if (models3.length >= 3) break;
+    try {
+      const r = await call(
+        candidate,
+        [
+          { role: "system", content: reviewerSystem },
+          { role: "user", content: reviewerUser }
+        ],
+        `reviewer_${models3.length + 1}_${candidate}`
+      );
+      const parsed = extractFirstJsonObject(r.text);
+      reviewerResults.push({ model: candidate, rawText: r.text, parsed, usage: r.usage });
+      models3.push(candidate);
+    } catch (e) {
+      if (provider === "github-models" && isUnknownModel(e)) {
+        warning(`Reviewer model rejected as unknown: ${candidate} (will fallback)`);
+        continue;
+      }
+      throw e;
+    }
+  }
+  if (models3.length < 2) {
+    throw new Error(
+      `Not enough reviewer models available to run council (got ${models3.length}). Try adjusting review_models or repo entitlements.`
     );
-    const parsed = extractFirstJsonObject(r.text);
-    reviewerResults.push({ model, rawText: r.text, parsed, usage: r.usage });
   }
   const judgeSystem = `You are the judge model. You receive 3 reviewer JSON outputs and the raw diff.
 Task: deduplicate, remove repetition, fix obvious mistakes, and output a single consolidated list of issues.

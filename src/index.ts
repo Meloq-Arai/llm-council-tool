@@ -298,9 +298,10 @@ async function run() {
       return out.slice(0, count);
     };
 
-    resolvedReviewModels = pick(reviewModels, 3);
-    resolvedJudgeModel = canonicalize(judgeModel) ?? pick([judgeModel], 1)[0] ?? 'gpt-4o';
-    resolvedVerifierModel = canonicalize(verifierModel) ?? pick([verifierModel], 1)[0] ?? 'gpt-4o-mini';
+    // Keep extra candidates so we can auto-fallback at runtime if GitHub Models rejects a model.
+    resolvedReviewModels = pick(reviewModels, 8);
+    resolvedJudgeModel = canonicalize(judgeModel) ?? pick([judgeModel], 2)[0] ?? 'gpt-4o';
+    resolvedVerifierModel = canonicalize(verifierModel) ?? pick([verifierModel], 2)[0] ?? 'gpt-4o-mini';
 
     core.info(
       `Resolved GitHub Models: reviewers=[${resolvedReviewModels.join(', ')}], judge=${resolvedJudgeModel}, verifier=${resolvedVerifierModel}`
@@ -349,23 +350,46 @@ async function run() {
 
   const reviewerResults: Array<{ model: string; rawText: string; parsed: any | null; usage?: any }> = [];
 
-  const models3 = resolvedReviewModels.length
-    ? resolvedReviewModels.slice(0, 3)
+  const reviewerCandidates = resolvedReviewModels.length
+    ? resolvedReviewModels
     : ['gpt-4o', 'Meta-Llama-3.1-405B-Instruct', 'gpt-4o-mini'];
 
-  for (let i = 0; i < models3.length; i++) {
-    const model = models3[i];
-    const r = await call(
-      model,
-      [
-        { role: 'system', content: reviewerSystem },
-        { role: 'user', content: reviewerUser },
-      ],
-      `reviewer_${i + 1}_${model}`
-    );
+  const models3: string[] = [];
 
-    const parsed = extractFirstJsonObject(r.text);
-    reviewerResults.push({ model, rawText: r.text, parsed, usage: r.usage });
+  const isUnknownModel = (e: any) =>
+    /unknown_model/i.test(String(e?.message ?? e ?? '')) ||
+    /"code"\s*:\s*"unknown_model"/i.test(String(e?.message ?? ''));
+
+  for (const candidate of reviewerCandidates) {
+    if (models3.length >= 3) break;
+
+    try {
+      const r = await call(
+        candidate,
+        [
+          { role: 'system', content: reviewerSystem },
+          { role: 'user', content: reviewerUser },
+        ],
+        `reviewer_${models3.length + 1}_${candidate}`
+      );
+
+      const parsed = extractFirstJsonObject(r.text);
+      reviewerResults.push({ model: candidate, rawText: r.text, parsed, usage: r.usage });
+      models3.push(candidate);
+    } catch (e: any) {
+      // GitHub Models sometimes lists a model that later rejects inference. Auto-fallback.
+      if (provider === 'github-models' && isUnknownModel(e)) {
+        core.warning(`Reviewer model rejected as unknown: ${candidate} (will fallback)`);
+        continue;
+      }
+      throw e;
+    }
+  }
+
+  if (models3.length < 2) {
+    throw new Error(
+      `Not enough reviewer models available to run council (got ${models3.length}). Try adjusting review_models or repo entitlements.`
+    );
   }
 
   // 2) Judge (dedupe + synthesize)
