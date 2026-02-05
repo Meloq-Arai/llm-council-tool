@@ -6,8 +6,9 @@ on:
 
 permissions:
   contents: read
-  pull-requests: read
+  pull-requests: write
   issues: write
+  models: read
 
 jobs:
   review:
@@ -16,12 +17,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Run LLM review
-        uses: ./. 
+      - name: Run LLM council review
+        uses: ./.
         with:
           github_token: ${{ github.token }}
-          openai_api_key: ${{ secrets.OPENAI_API_KEY }}
-          openai_model: gpt-4.1-mini
+          llm_provider: github-models
+          review_models: gpt-4o,Meta-Llama-3.1-405B-Instruct,Mistral-Nemo
+          judge_model: gpt-4o
+          verifier_model: gpt-4o-mini
+          min_confidence: 0.6
           max_files: 25
           max_patch_chars: 6000
           max_total_chars: 120000
+          output_dir: llm-council-tool-out
