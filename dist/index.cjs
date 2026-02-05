@@ -24015,8 +24015,9 @@ async function callStage(cfg, label, spec, messages) {
 async function runCouncil(cfg) {
   const usage = {};
   const reviewerSystem = `You are a top-tier senior software engineer doing PR review.
-Find ONLY high-signal problems (correctness, security, edge cases, maintainability).
+Find ONLY high-signal problems (correctness, security, edge cases, security, performance, maintainability).
 Avoid low-value nitpicks (style, personal preferences, "add logging", "add try/catch everywhere", "add runtime type checks" in TypeScript) unless there is a clear bug/security risk.
+Avoid speculative compatibility warnings unless the diff includes explicit target constraints (e.g. package.json engines, browserslist, tsconfig target) showing it will break.
 Assume this is a PR review: report issues that would realistically matter in production.
 You MUST quote exact evidence from the diff for every issue.
 "why_this_matters" MUST be non-empty.
@@ -24061,6 +24062,7 @@ ${stageDiffFor(spec)}`;
   }
   const judgeSystem = `You are the judge. Dedupe and consolidate reviewer issues.
 Remove weak / unsupported / repetitive / nitpicky items.
+Drop speculative compatibility warnings unless the diff includes explicit target constraints (package.json engines, browserslist, tsconfig target) that make it a real issue.
 Do NOT include suggestions like "add logging" or "add try/catch" unless it prevents a real bug or security issue.
 Every issue MUST include exact evidence quoted from diff.
 Every issue MUST include non-empty why_this_matters.
@@ -24111,6 +24113,7 @@ ${JSON.stringify(judgeJson, null, 2)}`;
   const verifierSystem = `You are a strict confidence checker. For each issue, verify it against the diff.
 If not clearly supported by the diff, mark unconfirmed with low confidence.
 If the issue is a nitpick / preference / hypothetical (logging, extra try/catch, runtime type checks in TS), mark it unconfirmed unless the diff shows a concrete failure mode.
+Compatibility issues are ONLY confirmed if the diff contains explicit target constraints (e.g. package.json engines, browserslist, tsconfig target) that make it a real break. Otherwise mark unconfirmed.
 You MUST quote evidence from the diff in your response.
 
 Output JSON ONLY: {"schemaVersion":1,"results":[{"issue_id":string,"confirmed":boolean,"confidence":number,"note":string,"evidence":string}]}`;
