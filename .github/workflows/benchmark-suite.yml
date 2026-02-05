@@ -1,0 +1,26 @@
+name: Benchmark Suite
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Run benchmark suite (artifact-based)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node eval/run-suite.mjs eval/suite.json
