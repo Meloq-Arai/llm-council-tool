@@ -27,6 +27,15 @@
       "expect": {
         "maxCritical": 0
       }
+    },
+    {
+      "name": "subtle",
+      "repo": "Meloq-Arai/Stride",
+      "workflow": "LLM Review",
+      "branch": "llm-council-eval-subtle",
+      "expect": {
+        "minConfirmed": 1
+      }
     }
   ]
 }
