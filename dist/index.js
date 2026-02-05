@@ -7,6 +7,41 @@ import { redactSecrets, shouldSkipFileByPath } from './lib/redact.js';
 import { runCouncil } from './council/pipeline-v2.js';
 import { labelsForIssues } from './council/labels.js';
 import { issuesToInlineComments } from './council/pr-comments.js';
+function annotatePatchWithLineNumbers(patch) {
+    const lines = String(patch || '').split(/\r?\n/);
+    let leftLine = 0;
+    let rightLine = 0;
+    const out = [];
+    for (const line of lines) {
+        const m = line.match(/^@@\s*-(\d+)(?:,(\d+))?\s*\+(\d+)(?:,(\d+))?\s*@@/);
+        if (m) {
+            leftLine = Number(m[1] || 0) || 0;
+            rightLine = Number(m[3] || 0) || 0;
+            out.push(line);
+            continue;
+        }
+        const first = line[0];
+        if (first === ' ') {
+            out.push(`L${leftLine} R${rightLine} ${line}`);
+            leftLine++;
+            rightLine++;
+            continue;
+        }
+        if (first === '-') {
+            out.push(`L${leftLine} R- ${line}`);
+            leftLine++;
+            continue;
+        }
+        if (first === '+') {
+            out.push(`L- R${rightLine} ${line}`);
+            rightLine++;
+            continue;
+        }
+        // metadata lines like "\\ No newline at end of file"
+        out.push(line);
+    }
+    return out.join('\n');
+}
 function shouldReviewFile(f) {
     const lower = f.filename.toLowerCase();
     if (shouldSkipFileByPath(lower))
@@ -202,7 +237,8 @@ async function main() {
     let truncated = false;
     const redactionKinds = new Set();
     for (const f of selected) {
-        const patchRaw = (f.patch || '').slice(0, maxPatchChars);
+        const patchAnnotated = annotatePatchWithLineNumbers(f.patch || '');
+        const patchRaw = patchAnnotated.slice(0, maxPatchChars);
         const red = redactSecrets(patchRaw);
         red.redactions.forEach((x) => redactionKinds.add(x));
         const block = `FILE: ${f.filename}\n` +
@@ -298,6 +334,37 @@ async function main() {
         const labels = labelsForIssues(final.issues.confirmed);
         if (labels.length) {
             try {
+                // Ensure labels exist to avoid failing on first use.
+                const existing = await octokit.request('GET /repos/{owner}/{repo}/labels', {
+                    owner,
+                    repo,
+                    per_page: 100,
+                });
+                const existingNames = new Set(existing.data.map((l) => String(l?.name ?? '').toLowerCase()));
+                const defaults = {
+                    'needs-security-review': { color: 'b60205', description: 'Security-sensitive change; needs review.' },
+                    'has-performance-risk': { color: 'd93f0b', description: 'Potential performance regression.' },
+                    'possible-breaking-change': { color: 'fbca04', description: 'May introduce a breaking change.' },
+                    'has-potential-regex-redos': { color: 'd93f0b', description: 'Potential regex DoS / catastrophic backtracking.' },
+                };
+                for (const name of labels) {
+                    if (existingNames.has(name.toLowerCase()))
+                        continue;
+                    const d = defaults[name] ?? { color: 'c2e0c6', description: 'Auto label from llm-council-tool.' };
+                    try {
+                        await octokit.request('POST /repos/{owner}/{repo}/labels', {
+                            owner,
+                            repo,
+                            name,
+                            color: d.color,
+                            description: d.description,
+                        });
+                        core.info(`Created missing label: ${name}`);
+                    }
+                    catch (e) {
+                        core.warning(`Failed to create label ${name}: ${String(e?.message ?? e)}`);
+                    }
+                }
                 await octokit.request('POST /repos/{owner}/{repo}/issues/{issue_number}/labels', {
                     owner,
                     repo,

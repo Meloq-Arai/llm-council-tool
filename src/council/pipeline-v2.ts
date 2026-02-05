@@ -91,8 +91,10 @@ export async function runCouncil(cfg: CouncilConfig): Promise<{ final: FinalOutp
     `Find ONLY high-signal problems (correctness, security, edge cases, security, performance, maintainability).\n` +
     `Avoid low-value nitpicks (style, personal preferences, "add logging", "add try/catch everywhere", "add runtime type checks" in TypeScript) unless there is a clear bug/security risk.\n` +
     `Avoid speculative compatibility warnings unless the diff includes explicit target constraints (e.g. package.json engines, browserslist, tsconfig target) showing it will break.\n` +
-    `Assume this is a PR review: report issues that would realistically matter in production.\n` +
-    `You MUST quote exact evidence from the diff for every issue.\n` +
+    `Assume this is a PR review: report issues that would realistically matter in production.\n\n` +
+    `IMPORTANT: Patch lines are annotated with prefixes like "L12 R34".\n` +
+    `- Use RIGHT-side (R) line numbers for line_range when side="RIGHT".\n` +
+    `- Evidence MUST quote exact annotated lines (including the L/R prefix).\n` +
     `"why_this_matters" MUST be non-empty.\n\n` +
     `Output JSON ONLY (no markdown, no code fences).\n` +
     `Schema: {"schemaVersion":1,"issues":[{"issue_id":string,"title":string,"severity":"critical"|"high"|"medium"|"low","category":string,"file":string,"line_range":{"start":number,"end":number,"side":"RIGHT"|"LEFT"},"why_this_matters":string,"description":string,"evidence":string,"suggestion":string,"risk":number,"fix_effort":"xs"|"s"|"m"|"l"}]}`;
@@ -146,7 +148,7 @@ export async function runCouncil(cfg: CouncilConfig): Promise<{ final: FinalOutp
     `Remove weak / unsupported / repetitive / nitpicky items.\n` +
     `Drop speculative compatibility warnings unless the diff includes explicit target constraints (package.json engines, browserslist, tsconfig target) that make it a real issue.\n` +
     `Do NOT include suggestions like "add logging" or "add try/catch" unless it prevents a real bug or security issue.\n` +
-    `Every issue MUST include exact evidence quoted from diff.\n` +
+    `Every issue MUST include exact evidence quoted from diff (including L/R prefixes when present).\n` +
     `Every issue MUST include non-empty why_this_matters.\n\n` +
     `Output JSON ONLY. SchemaVersion=1. issues[].issue_id must be stable short ids (I1,I2,...).\n` +
     `Return up to 25 issues.`;
@@ -197,7 +199,7 @@ export async function runCouncil(cfg: CouncilConfig): Promise<{ final: FinalOutp
     `If not clearly supported by the diff, mark unconfirmed with low confidence.\n` +
     `If the issue is a nitpick / preference / hypothetical (logging, extra try/catch, runtime type checks in TS), mark it unconfirmed unless the diff shows a concrete failure mode.\n` +
     `Compatibility issues are ONLY confirmed if the diff contains explicit target constraints (e.g. package.json engines, browserslist, tsconfig target) that make it a real break. Otherwise mark unconfirmed.\n` +
-    `You MUST quote evidence from the diff in your response.\n\n` +
+    `You MUST quote evidence from the diff in your response (including L/R prefixes when present).\n\n` +
     `Output JSON ONLY: {"schemaVersion":1,"results":[{"issue_id":string,"confirmed":boolean,"confidence":number,"note":string,"evidence":string}]}`;
 
   const verifierUser = `Diff:\n\n${stageDiffFor(cfg.verifier)}\n\nIssues:\n\n${JSON.stringify(judgeIssues, null, 2)}`;

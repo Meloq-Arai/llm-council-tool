@@ -24019,7 +24019,10 @@ Find ONLY high-signal problems (correctness, security, edge cases, security, per
 Avoid low-value nitpicks (style, personal preferences, "add logging", "add try/catch everywhere", "add runtime type checks" in TypeScript) unless there is a clear bug/security risk.
 Avoid speculative compatibility warnings unless the diff includes explicit target constraints (e.g. package.json engines, browserslist, tsconfig target) showing it will break.
 Assume this is a PR review: report issues that would realistically matter in production.
-You MUST quote exact evidence from the diff for every issue.
+
+IMPORTANT: Patch lines are annotated with prefixes like "L12 R34".
+- Use RIGHT-side (R) line numbers for line_range when side="RIGHT".
+- Evidence MUST quote exact annotated lines (including the L/R prefix).
 "why_this_matters" MUST be non-empty.
 
 Output JSON ONLY (no markdown, no code fences).
@@ -24064,7 +24067,7 @@ ${stageDiffFor(spec)}`;
 Remove weak / unsupported / repetitive / nitpicky items.
 Drop speculative compatibility warnings unless the diff includes explicit target constraints (package.json engines, browserslist, tsconfig target) that make it a real issue.
 Do NOT include suggestions like "add logging" or "add try/catch" unless it prevents a real bug or security issue.
-Every issue MUST include exact evidence quoted from diff.
+Every issue MUST include exact evidence quoted from diff (including L/R prefixes when present).
 Every issue MUST include non-empty why_this_matters.
 
 Output JSON ONLY. SchemaVersion=1. issues[].issue_id must be stable short ids (I1,I2,...).
@@ -24114,7 +24117,7 @@ ${JSON.stringify(judgeJson, null, 2)}`;
 If not clearly supported by the diff, mark unconfirmed with low confidence.
 If the issue is a nitpick / preference / hypothetical (logging, extra try/catch, runtime type checks in TS), mark it unconfirmed unless the diff shows a concrete failure mode.
 Compatibility issues are ONLY confirmed if the diff contains explicit target constraints (e.g. package.json engines, browserslist, tsconfig target) that make it a real break. Otherwise mark unconfirmed.
-You MUST quote evidence from the diff in your response.
+You MUST quote evidence from the diff in your response (including L/R prefixes when present).
 
 Output JSON ONLY: {"schemaVersion":1,"results":[{"issue_id":string,"confirmed":boolean,"confidence":number,"note":string,"evidence":string}]}`;
   const verifierUser = `Diff:
@@ -24239,6 +24242,40 @@ Suggestion: ${i.suggestion}`
 }
 
 // src/index.ts
+function annotatePatchWithLineNumbers(patch) {
+  const lines = String(patch || "").split(/\r?\n/);
+  let leftLine = 0;
+  let rightLine = 0;
+  const out = [];
+  for (const line of lines) {
+    const m = line.match(/^@@\s*-(\d+)(?:,(\d+))?\s*\+(\d+)(?:,(\d+))?\s*@@/);
+    if (m) {
+      leftLine = Number(m[1] || 0) || 0;
+      rightLine = Number(m[3] || 0) || 0;
+      out.push(line);
+      continue;
+    }
+    const first = line[0];
+    if (first === " ") {
+      out.push(`L${leftLine} R${rightLine} ${line}`);
+      leftLine++;
+      rightLine++;
+      continue;
+    }
+    if (first === "-") {
+      out.push(`L${leftLine} R- ${line}`);
+      leftLine++;
+      continue;
+    }
+    if (first === "+") {
+      out.push(`L- R${rightLine} ${line}`);
+      rightLine++;
+      continue;
+    }
+    out.push(line);
+  }
+  return out.join("\n");
+}
 function shouldReviewFile(f) {
   const lower = f.filename.toLowerCase();
   if (shouldSkipFileByPath(lower)) return false;
@@ -24410,7 +24447,8 @@ Skipped: ${reason}
   let truncated = false;
   const redactionKinds = /* @__PURE__ */ new Set();
   for (const f of selected) {
-    const patchRaw = (f.patch || "").slice(0, maxPatchChars);
+    const patchAnnotated = annotatePatchWithLineNumbers(f.patch || "");
+    const patchRaw = patchAnnotated.slice(0, maxPatchChars);
     const red = redactSecrets(patchRaw);
     red.redactions.forEach((x) => redactionKinds.add(x));
     const block = `FILE: ${f.filename}
@@ -24500,6 +24538,34 @@ ${red.text || "[no patch provided by GitHub]"}
     const labels = labelsForIssues(final.issues.confirmed);
     if (labels.length) {
       try {
+        const existing2 = await octokit.request("GET /repos/{owner}/{repo}/labels", {
+          owner,
+          repo,
+          per_page: 100
+        });
+        const existingNames = new Set(existing2.data.map((l) => String(l?.name ?? "").toLowerCase()));
+        const defaults2 = {
+          "needs-security-review": { color: "b60205", description: "Security-sensitive change; needs review." },
+          "has-performance-risk": { color: "d93f0b", description: "Potential performance regression." },
+          "possible-breaking-change": { color: "fbca04", description: "May introduce a breaking change." },
+          "has-potential-regex-redos": { color: "d93f0b", description: "Potential regex DoS / catastrophic backtracking." }
+        };
+        for (const name of labels) {
+          if (existingNames.has(name.toLowerCase())) continue;
+          const d = defaults2[name] ?? { color: "c2e0c6", description: "Auto label from llm-council-tool." };
+          try {
+            await octokit.request("POST /repos/{owner}/{repo}/labels", {
+              owner,
+              repo,
+              name,
+              color: d.color,
+              description: d.description
+            });
+            info(`Created missing label: ${name}`);
+          } catch (e) {
+            warning(`Failed to create label ${name}: ${String(e?.message ?? e)}`);
+          }
+        }
         await octokit.request("POST /repos/{owner}/{repo}/issues/{issue_number}/labels", {
           owner,
           repo,
