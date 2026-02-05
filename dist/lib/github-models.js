@@ -30,6 +30,23 @@ function extractUsage(data) {
         return { inputTokens, outputTokens, totalTokens };
     return undefined;
 }
+export async function listGithubModels(token) {
+    const resp = await fetch('https://models.inference.ai.azure.com/models', {
+        headers: {
+            Authorization: `Bearer ${token}`,
+        },
+    });
+    if (!resp.ok) {
+        const text = await resp.text().catch(() => '');
+        throw new Error(`GitHub Models list error: ${resp.status} ${resp.statusText}${text ? `\n${text}` : ''}`);
+    }
+    const data = await resp.json();
+    if (!Array.isArray(data))
+        return [];
+    return data
+        .map((m) => ({ name: String(m?.name ?? m?.id ?? '') }))
+        .filter((m) => m.name && m.name !== '[object Object]');
+}
 export async function callGithubModels({ token, model, messages, timeoutMs = 120_000, maxRetries = 3, retryBaseDelayMs = 1000, temperature, maxTokens, }) {
     let lastErr;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
