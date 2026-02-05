@@ -4,9 +4,13 @@ import * as github from '@actions/github';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-import { callLLM, type LLMProvider, type LLMResult } from './lib/llm.js';
 import { listGithubModels } from './lib/github-models.js';
-import { extractFirstJsonObject } from './council/json.js';
+import { redactSecrets, shouldSkipFileByPath } from './lib/redact.js';
+
+import { runCouncil, type ModelSpec } from './council/pipeline-v2.js';
+import type { FinalOutput } from './council/schema.js';
+import { labelsForIssues } from './council/labels.js';
+import { issuesToInlineComments } from './council/pr-comments.js';
 
 type PRFile = {
   filename: string;
@@ -17,35 +21,10 @@ type PRFile = {
   patch?: string;
 };
 
-type Issue = {
-  id: string;
-  title: string;
-  severity: 'critical' | 'high' | 'medium' | 'low';
-  category: string;
-  files: string[];
-  description: string;
-  evidence?: string;
-  suggestion?: string;
-};
-
-type JudgeOutput = {
-  schemaVersion: 1;
-  issues: Issue[];
-};
-
-type VerifierOutput = {
-  schemaVersion: 1;
-  results: Array<{
-    id: string;
-    confirmed: boolean;
-    confidence: number; // 0..1
-    note?: string;
-    evidence?: string;
-  }>;
-};
-
 function shouldReviewFile(f: PRFile): boolean {
   const lower = f.filename.toLowerCase();
+
+  if (shouldSkipFileByPath(lower)) return false;
 
   // common junk
   if (lower.endsWith('.lock')) return false;
@@ -72,6 +51,11 @@ function parseCsvList(s: string): string[] {
     .split(',')
     .map((x) => x.trim())
     .filter(Boolean);
+}
+
+function parseBool(s: string | undefined, def = false): boolean {
+  if (s == null || s === '') return def;
+  return ['1', 'true', 'yes', 'on'].includes(String(s).toLowerCase());
 }
 
 function sleep(ms: number) {
@@ -151,37 +135,40 @@ async function writeOutputs(params: {
   core.setOutput('meta_path', path.relative(workspace, metaPath));
 }
 
-function toMarkdownIssue(i: Issue, v?: { confirmed: boolean; confidence: number; note?: string; evidence?: string }) {
-  const conf = v ? ` (confidence ${(v.confidence * 100).toFixed(0)}%)` : '';
-  const header = `- **${i.title}** — _${i.severity}/${i.category}_${conf}`;
-
-  const lines: string[] = [header];
-  if (i.files?.length) lines.push(`  - Files: ${i.files.join(', ')}`);
-  if (i.description) lines.push(`  - ${i.description}`);
-  if (v?.evidence || i.evidence) lines.push(`  - Evidence: ${v?.evidence ?? i.evidence}`);
-  if (i.suggestion) lines.push(`  - Suggestion: ${i.suggestion}`);
-  if (v?.note) lines.push(`  - Note: ${v.note}`);
-  return lines.join('\n');
+function parseModelSpec(s: string, defaultProvider: string): ModelSpec {
+  const raw = String(s || '').trim();
+  const m = raw.match(/^([a-zA-Z0-9\-]+)\s*:\s*(.+)$/);
+  if (m) {
+    return { provider: m[1] as any, model: m[2].trim() };
+  }
+  return { provider: defaultProvider as any, model: raw };
 }
 
-async function run() {
+async function main() {
   const ghToken = core.getInput('github_token') || process.env.GITHUB_TOKEN;
   if (!ghToken) throw new Error('GitHub token is missing (github_token input / GITHUB_TOKEN env)');
 
-  const provider = (core.getInput('llm_provider') || 'github-models') as LLMProvider;
-  const openaiApiKey = core.getInput('openai_api_key') || process.env.OPENAI_API_KEY;
+  const defaultProvider = core.getInput('llm_provider') || 'github-models';
 
-  const reviewModels = parseCsvList(core.getInput('review_models'));
-  let judgeModel = core.getInput('judge_model') || 'gpt-4o';
-  let verifierModel = core.getInput('verifier_model') || 'gpt-4o-mini';
+  const openaiApiKey = core.getInput('openai_api_key') || process.env.OPENAI_API_KEY;
+  const googleApiKey = core.getInput('google_api_key') || process.env.GOOGLE_API_KEY;
+
+  const reviewModelsRaw = parseCsvList(core.getInput('review_models'));
+  const judgeModelRaw = core.getInput('judge_model') || 'gpt-4o';
+  const verifierModelRaw = core.getInput('verifier_model') || 'gpt-4o-mini';
+  const verifier2ModelRaw = core.getInput('verifier2_model');
+  const criticModelRaw = core.getInput('critic_model');
 
   const maxFiles = Number(core.getInput('max_files') || '25');
   const maxPatchChars = Number(core.getInput('max_patch_chars') || '6000');
   const maxTotalChars = Number(core.getInput('max_total_chars') || '120000');
-  const minConfidence = Number(core.getInput('min_confidence') || '0.55');
+  const minConfidence = Number(core.getInput('min_confidence') || '0.6');
 
-  const outputDir = core.getInput('output_dir') || '.llm-council-tool';
+  const outputDir = core.getInput('output_dir') || 'llm-council-tool-out';
   const writeFiles = (core.getInput('write_files') || 'true').toLowerCase() !== 'false';
+
+  const addLabels = parseBool(core.getInput('add_labels'), true);
+  const addInline = parseBool(core.getInput('add_inline_comments'), false);
 
   const ctx = github.context;
   if (ctx.eventName !== 'pull_request' && ctx.eventName !== 'pull_request_target') {
@@ -192,9 +179,10 @@ async function run() {
   const pr = (ctx.payload as any).pull_request;
   if (!pr) throw new Error('No pull_request in context payload');
 
-  const { owner, repo } = ctx.repo;
   const prNumber: number = pr.number;
+  const headSha: string = pr.head?.sha;
 
+  const { owner, repo } = ctx.repo;
   const octokit = github.getOctokit(ghToken);
 
   // Fetch changed files (paginated)
@@ -221,18 +209,22 @@ async function run() {
     return;
   }
 
-  // Build a bounded diff payload
+  // Build bounded diff payload (with redaction)
   const parts: string[] = [];
   let total = 0;
   let truncated = false;
+  const redactionKinds = new Set<string>();
 
   for (const f of selected) {
-    const patch = (f.patch || '').slice(0, maxPatchChars);
+    const patchRaw = (f.patch || '').slice(0, maxPatchChars);
+    const red = redactSecrets(patchRaw);
+    red.redactions.forEach((x) => redactionKinds.add(x));
+
     const block =
       `FILE: ${f.filename}\n` +
       `STATUS: ${f.status}\n` +
       `CHANGES: +${f.additions}/-${f.deletions}\n` +
-      `PATCH:\n${patch || '[no patch provided by GitHub]'}\n`;
+      `PATCH:\n${red.text || '[no patch provided by GitHub]'}\n`;
 
     if (total + block.length > maxTotalChars) {
       truncated = true;
@@ -245,326 +237,62 @@ async function run() {
 
   const diffText = parts.join('\n---\n');
 
-  const llmAuth = {
-    provider,
-    githubToken: ghToken,
-    openaiApiKey,
-  };
-
-  // Resolve GitHub Models names (available models differ by account/entitlement; names can be case-sensitive).
-  let resolvedReviewModels = reviewModels;
-  let resolvedJudgeModel = judgeModel;
-  let resolvedVerifierModel = verifierModel;
-
-  if (provider === 'github-models') {
+  // Resolve GitHub Models names (best-effort)
+  const resolveForGithubModels = async (names: string[]): Promise<string[]> => {
     const available = await listGithubModels(ghToken);
     const nameMap = new Map<string, string>();
     for (const m of available) {
-      const n = String(m.name || '').trim();
-      if (!n) continue;
-      nameMap.set(n.toLowerCase(), n);
+      const n = String((m as any).name || '').trim();
+      if (n) nameMap.set(n.toLowerCase(), n);
     }
+    return names.map((n) => nameMap.get(String(n).toLowerCase()) ?? n);
+  };
 
-    const canonicalize = (name: string): string | null => {
-      const key = String(name || '').trim().toLowerCase();
-      return key ? (nameMap.get(key) ?? null) : null;
-    };
+  const reviewersSpecs: ModelSpec[] = [];
+  const reviewerItems = reviewModelsRaw.length ? reviewModelsRaw : ['gpt-4o', 'Meta-Llama-3.1-405B-Instruct', 'gpt-4o-mini'];
 
-    const fallbackPool = [
-      'gpt-4o',
-      'Meta-Llama-3.1-405B-Instruct',
-      'Meta-Llama-3.1-70B-Instruct',
-      'Meta-Llama-3-70B-Instruct',
-      'AI21-Jamba-Instruct',
-      'Mistral-large-2407',
-      'gpt-4o-mini',
-    ];
+  let reviewerModelsResolved = reviewerItems;
+  if (defaultProvider === 'github-models') reviewerModelsResolved = await resolveForGithubModels(reviewerModelsResolved);
 
-    const pick = (requested: string[], count: number): string[] => {
-      const out: string[] = [];
-      const seen = new Set<string>();
+  for (const r of reviewerModelsResolved) reviewersSpecs.push(parseModelSpec(r, defaultProvider));
 
-      const add = (n: string | null) => {
-        if (!n) return;
-        const k = n.toLowerCase();
-        if (seen.has(k)) return;
-        seen.add(k);
-        out.push(n);
-      };
+  let judgeSpec = parseModelSpec(judgeModelRaw, defaultProvider);
+  let verifierSpec = parseModelSpec(verifierModelRaw, defaultProvider);
+  let verifier2Spec = verifier2ModelRaw ? parseModelSpec(verifier2ModelRaw, defaultProvider) : undefined;
+  let criticSpec = criticModelRaw ? parseModelSpec(criticModelRaw, defaultProvider) : undefined;
 
-      for (const r of requested) add(canonicalize(r));
-      for (const f of fallbackPool) add(canonicalize(f));
-
-      return out.slice(0, count);
-    };
-
-    // Keep extra candidates so we can auto-fallback at runtime if GitHub Models rejects a model.
-    resolvedReviewModels = pick(reviewModels, 8);
-    resolvedJudgeModel = canonicalize(judgeModel) ?? pick([judgeModel], 2)[0] ?? 'gpt-4o';
-    resolvedVerifierModel = canonicalize(verifierModel) ?? pick([verifierModel], 2)[0] ?? 'gpt-4o-mini';
-
-    core.info(
-      `Resolved GitHub Models: reviewers=[${resolvedReviewModels.join(', ')}], judge=${resolvedJudgeModel}, verifier=${resolvedVerifierModel}`
-    );
-  }
-
-  const usage: Record<string, any> = {};
-
-  async function call(model: string, messages: any[], label: string): Promise<LLMResult> {
-    const r = await callLLM({
-      provider: llmAuth.provider,
-      model,
-      messages,
-      openaiApiKey: llmAuth.openaiApiKey,
-      githubToken: llmAuth.githubToken,
-      timeoutMs: 240_000,
-      maxRetries: 3,
-    });
-    usage[label] = r.usage;
-    return r;
-  }
-
-  // 1) Reviewers
-  const reviewerSystem =
-    `You are a top-tier senior software engineer doing PR review.\n` +
-    `Goal: find high-signal problems (correctness, security, edge cases, maintainability).\n\n` +
-    `Output JSON ONLY (no markdown, no code fences).\n` +
-    `Schema:\n` +
-    `{\n` +
-    `  "schemaVersion": 1,\n` +
-    `  "issues": [\n` +
-    `    {\n` +
-    `      "title": string,\n` +
-    `      "severity": "critical"|"high"|"medium"|"low",\n` +
-    `      "category": string,\n` +
-    `      "files": string[],\n` +
-    `      "description": string,\n` +
-    `      "evidence": string,\n` +
-    `      "suggestion": string\n` +
-    `    }\n` +
-    `  ]\n` +
-    `}`;
-
-  const reviewerUser =
-    `Review the following PR diffs. Quote evidence from the PATCH when possible.\n\n${diffText}`;
-
-  const reviewerResults: Array<{ model: string; rawText: string; parsed: any | null; usage?: any }> = [];
-
-  const reviewerCandidates = resolvedReviewModels.length
-    ? resolvedReviewModels
-    : ['gpt-4o', 'Meta-Llama-3.1-405B-Instruct', 'gpt-4o-mini'];
-
-  const models3: string[] = [];
-
-  const isUnknownModel = (e: any) =>
-    /unknown_model/i.test(String(e?.message ?? e ?? '')) ||
-    /"code"\s*:\s*"unknown_model"/i.test(String(e?.message ?? ''));
-
-  for (const candidate of reviewerCandidates) {
-    if (models3.length >= 3) break;
-
-    try {
-      const r = await call(
-        candidate,
-        [
-          { role: 'system', content: reviewerSystem },
-          { role: 'user', content: reviewerUser },
-        ],
-        `reviewer_${models3.length + 1}_${candidate}`
-      );
-
-      const parsed = extractFirstJsonObject(r.text);
-      reviewerResults.push({ model: candidate, rawText: r.text, parsed, usage: r.usage });
-      models3.push(candidate);
-    } catch (e: any) {
-      // GitHub Models sometimes lists a model that later rejects inference. Auto-fallback.
-      if (provider === 'github-models' && isUnknownModel(e)) {
-        core.warning(`Reviewer model rejected as unknown: ${candidate} (will fallback)`);
-        continue;
-      }
-      throw e;
+  if (defaultProvider === 'github-models') {
+    // If user provided bare model names, canonicalize them too.
+    const [j2] = await resolveForGithubModels([judgeSpec.model]);
+    judgeSpec = { ...judgeSpec, model: j2 };
+    const [v2] = await resolveForGithubModels([verifierSpec.model]);
+    verifierSpec = { ...verifierSpec, model: v2 };
+    if (verifier2Spec) {
+      const [vv] = await resolveForGithubModels([verifier2Spec.model]);
+      verifier2Spec = { ...verifier2Spec, model: vv };
+    }
+    if (criticSpec) {
+      const [cc] = await resolveForGithubModels([criticSpec.model]);
+      criticSpec = { ...criticSpec, model: cc };
     }
   }
 
-  if (models3.length < 2) {
-    throw new Error(
-      `Not enough reviewer models available to run council (got ${models3.length}). Try adjusting review_models or repo entitlements.`
-    );
-  }
+  const { final, markdown, usage } = await runCouncil({
+    githubToken: ghToken,
+    openaiApiKey,
+    googleApiKey,
+    reviewers: reviewersSpecs.slice(0, 3),
+    judge: judgeSpec,
+    verifier: verifierSpec,
+    verifier2: verifier2Spec,
+    critic: criticSpec,
+    minConfidence,
+    diffText,
+    truncatedDiff: truncated,
+  });
 
-  // 2) Judge (dedupe + synthesize)
-  const judgeSystem =
-    `You are the judge model. You receive 3 reviewer JSON outputs and the raw diff.\n` +
-    `Task: deduplicate, remove repetition, fix obvious mistakes, and output a single consolidated list of issues.\n` +
-    `Prefer fewer, higher-signal issues with strong evidence.\n\n` +
-    `Output JSON ONLY (no markdown, no code fences).\n` +
-    `Schema:\n` +
-    `{\n` +
-    `  "schemaVersion": 1,\n` +
-    `  "issues": [\n` +
-    `    {\n` +
-    `      "id": string,\n` +
-    `      "title": string,\n` +
-    `      "severity": "critical"|"high"|"medium"|"low",\n` +
-    `      "category": string,\n` +
-    `      "files": string[],\n` +
-    `      "description": string,\n` +
-    `      "evidence": string,\n` +
-    `      "suggestion": string\n` +
-    `    }\n` +
-    `  ]\n` +
-    `}`;
-
-  const judgeUser =
-    `Diff:\n\n${diffText}\n\n` +
-    `Reviewer outputs (may be imperfect):\n\n` +
-    reviewerResults
-      .map((rr, idx) => {
-        const payload = rr.parsed ? JSON.stringify(rr.parsed) : rr.rawText;
-        return `REVIEWER_${idx + 1} (${rr.model}):\n${payload}`;
-      })
-      .join('\n\n');
-
-  const judgeRes = await call(
-    resolvedJudgeModel,
-    [
-      { role: 'system', content: judgeSystem },
-      { role: 'user', content: judgeUser },
-    ],
-    `judge_${resolvedJudgeModel}`
-  );
-
-  const judgeParsed = extractFirstJsonObject(judgeRes.text) as JudgeOutput | null;
-  const judgeIssues: Issue[] = Array.isArray(judgeParsed?.issues)
-    ? judgeParsed!.issues
-        .map((x: any, idx: number) => ({
-          id: String(x.id || `I${idx + 1}`),
-          title: String(x.title || 'Untitled'),
-          severity: (['critical', 'high', 'medium', 'low'].includes(String(x.severity))
-            ? String(x.severity)
-            : 'medium') as any,
-          category: String(x.category || 'general'),
-          files: Array.isArray(x.files) ? x.files.map((f: any) => String(f)) : [],
-          description: String(x.description || ''),
-          evidence: typeof x.evidence === 'string' ? x.evidence : undefined,
-          suggestion: typeof x.suggestion === 'string' ? x.suggestion : undefined,
-        }))
-        .slice(0, 30)
-    : [];
-
-  // 3) Confidence checker
-  const verifierSystem =
-    `You are a strict confidence checker. You must verify each proposed issue against the diff.\n` +
-    `If the diff does NOT support an issue, mark it unconfirmed with low confidence.\n\n` +
-    `Output JSON ONLY (no markdown, no code fences).\n` +
-    `Schema:\n` +
-    `{\n` +
-    `  "schemaVersion": 1,\n` +
-    `  "results": [\n` +
-    `    { "id": string, "confirmed": boolean, "confidence": number, "note": string, "evidence": string }\n` +
-    `  ]\n` +
-    `}`;
-
-  const verifierUser =
-    `Diff:\n\n${diffText}\n\n` +
-    `Issues to verify:\n\n` +
-    JSON.stringify(
-      judgeIssues.map((i) => ({
-        id: i.id,
-        title: i.title,
-        severity: i.severity,
-        category: i.category,
-        files: i.files,
-        description: i.description,
-        evidence: i.evidence,
-        suggestion: i.suggestion,
-      })),
-      null,
-      2
-    );
-
-  const verifierRes = await call(
-    resolvedVerifierModel,
-    [
-      { role: 'system', content: verifierSystem },
-      { role: 'user', content: verifierUser },
-    ],
-    `verifier_${resolvedVerifierModel}`
-  );
-
-  const verifierParsed = extractFirstJsonObject(verifierRes.text) as VerifierOutput | null;
-  const verifierMap = new Map<string, { confirmed: boolean; confidence: number; note?: string; evidence?: string }>();
-
-  if (Array.isArray(verifierParsed?.results)) {
-    for (const r of verifierParsed!.results) {
-      const id = String((r as any).id ?? '').trim();
-      if (!id) continue;
-      const confidence = Math.max(0, Math.min(1, Number((r as any).confidence ?? 0)));
-      verifierMap.set(id, {
-        confirmed: Boolean((r as any).confirmed),
-        confidence,
-        note: typeof (r as any).note === 'string' ? (r as any).note : undefined,
-        evidence: typeof (r as any).evidence === 'string' ? (r as any).evidence : undefined,
-      });
-    }
-  }
-
-  const confirmed: Issue[] = [];
-  const uncertain: Issue[] = [];
-
-  for (const i of judgeIssues) {
-    const v = verifierMap.get(i.id);
-    const c = v?.confidence ?? 0;
-    const ok = Boolean(v?.confirmed) && c >= minConfidence;
-    (ok ? confirmed : uncertain).push(i);
-  }
-
+  // Post / update PR comment
   const marker = '<!-- llm-council-tool -->';
-
-  const modelsLine = `Reviewers: ${models3.join(', ')} · Judge: ${resolvedJudgeModel} · Verifier: ${resolvedVerifierModel}`;
-
-  const mdLines: string[] = [];
-  mdLines.push(marker);
-  mdLines.push('## 🤖 LLM Council Review');
-  mdLines.push('');
-  mdLines.push(modelsLine);
-  mdLines.push('');
-  mdLines.push(`Selected files: ${parts.length}${truncated ? ` (diff truncated to fit max_total_chars=${maxTotalChars})` : ''}`);
-  mdLines.push('');
-
-  mdLines.push('### Summary');
-  mdLines.push('');
-  mdLines.push(`Confirmed issues: **${confirmed.length}** · Uncertain: **${uncertain.length}**`);
-  mdLines.push('');
-
-  mdLines.push('### Confirmed issues');
-  mdLines.push('');
-  if (!confirmed.length) mdLines.push('- (none)');
-  for (const i of confirmed) {
-    mdLines.push(toMarkdownIssue(i, verifierMap.get(i.id)));
-  }
-  mdLines.push('');
-
-  mdLines.push('### Uncertain / needs human check');
-  mdLines.push('');
-  if (!uncertain.length) mdLines.push('- (none)');
-  for (const i of uncertain) {
-    mdLines.push(toMarkdownIssue(i, verifierMap.get(i.id)));
-  }
-  mdLines.push('');
-
-  const usageJson = JSON.stringify(usage, null, 2);
-  mdLines.push('<details>');
-  mdLines.push('<summary>Usage (tokens)</summary>');
-  mdLines.push('');
-  mdLines.push('```json');
-  mdLines.push(usageJson);
-  mdLines.push('```');
-  mdLines.push('</details>');
-
-  const reviewMarkdown = mdLines.join('\n');
-
-  // Update existing comment (no spam)
   const comments = await octokit.request('GET /repos/{owner}/{repo}/issues/{issue_number}/comments', {
     owner,
     repo,
@@ -579,7 +307,7 @@ async function run() {
       owner,
       repo,
       comment_id: existing.id,
-      body: reviewMarkdown,
+      body: markdown,
     });
     core.info('Updated existing PR review comment.');
   } else {
@@ -587,80 +315,86 @@ async function run() {
       owner,
       repo,
       issue_number: prNumber,
-      body: reviewMarkdown,
+      body: markdown,
     });
     core.info('Posted PR review comment.');
   }
 
-  core.setOutput('review_markdown', reviewMarkdown);
+  // Optional: apply labels
+  if (addLabels) {
+    const labels = labelsForIssues((final as FinalOutput).issues.confirmed);
+    if (labels.length) {
+      try {
+        await octokit.request('POST /repos/{owner}/{repo}/issues/{issue_number}/labels', {
+          owner,
+          repo,
+          issue_number: prNumber,
+          labels,
+        });
+        core.info(`Applied labels: ${labels.join(', ')}`);
+      } catch (e: any) {
+        core.warning(`Failed to apply labels: ${String(e?.message ?? e)}`);
+      }
+    }
+  }
+
+  // Optional: inline PR review comments
+  if (addInline && headSha) {
+    const inline = issuesToInlineComments((final as FinalOutput).issues.confirmed).slice(0, 10);
+    for (const c of inline) {
+      try {
+        await octokit.request('POST /repos/{owner}/{repo}/pulls/{pull_number}/comments', {
+          owner,
+          repo,
+          pull_number: prNumber,
+          commit_id: headSha,
+          path: c.path,
+          side: 'RIGHT',
+          line: c.line,
+          body: c.body,
+        });
+      } catch (e: any) {
+        core.warning(`Inline comment failed (${c.path}:${c.line}): ${String(e?.message ?? e)}`);
+      }
+    }
+  }
+
+  // Outputs + summary
+  core.setOutput('review_markdown', markdown);
   core.setOutput('selected_files', String(parts.length));
   core.setOutput('selected_filenames', JSON.stringify(selected.slice(0, parts.length).map((f) => f.filename)));
 
+  await core.summary
+    .addHeading('LLM Council Tool')
+    .addRaw(`Reviewed files: ${parts.length}\n\nConfirmed: ${(final as FinalOutput).summary.confirmedCount}\nUncertain: ${(final as FinalOutput).summary.uncertainCount}\n`)
+    .write();
+
+  // Artifacts
   const meta = {
-    schemaVersion: 2,
-    provider,
+    ...final,
     repo: { owner, repo },
     prNumber,
-    models: {
-      reviewers: models3,
-      judge: resolvedJudgeModel,
-      verifier: resolvedVerifierModel,
-    },
     budgets: { maxFiles, maxPatchChars, maxTotalChars },
-    minConfidence,
-    selectedFiles: selected.slice(0, parts.length).map((f) => ({
-      filename: f.filename,
-      additions: f.additions,
-      deletions: f.deletions,
-      status: f.status,
-    })),
-    truncated,
-    usage,
-    createdAt: new Date().toISOString(),
+    redactions: [...redactionKinds],
   };
 
   if (writeFiles) {
-    const blobs: Array<{ relPath: string; content: string }> = [];
-
-    for (let i = 0; i < reviewerResults.length; i++) {
-      const rr = reviewerResults[i];
-      blobs.push({
-        relPath: `reviewers/reviewer-${i + 1}-${rr.model}.txt`,
-        content: rr.rawText,
-      });
-      if (rr.parsed) {
-        blobs.push({
-          relPath: `reviewers/reviewer-${i + 1}-${rr.model}.json`,
-          content: JSON.stringify(rr.parsed, null, 2),
-        });
-      }
-    }
-
-    blobs.push({ relPath: 'judge.txt', content: judgeRes.text });
-    if (judgeParsed) blobs.push({ relPath: 'judge.json', content: JSON.stringify(judgeParsed, null, 2) });
-
-    blobs.push({ relPath: 'verifier.txt', content: verifierRes.text });
-    if (verifierParsed) blobs.push({ relPath: 'verifier.json', content: JSON.stringify(verifierParsed, null, 2) });
-
     await writeOutputs({
       outputDir,
-      reviewMarkdown,
+      reviewMarkdown: markdown,
       diffText,
       meta,
-      blobs,
+      blobs: [
+        { relPath: 'final.json', content: JSON.stringify(final, null, 2) },
+        { relPath: 'usage.json', content: JSON.stringify(usage, null, 2) },
+      ],
     });
   }
-
-  await core.summary
-    .addHeading('LLM Council Tool')
-    .addRaw(`Provider: ${provider}\n\n${modelsLine}\n\nReviewed files: ${parts.length}\n`)
-    .addRaw(writeFiles ? `\nWrote outputs to: ${outputDir}\n` : '')
-    .write();
 }
 
 (async () => {
   try {
-    await runWithRetries(run);
+    await runWithRetries(main);
   } catch (err) {
     core.setFailed(String((err as any)?.stack ?? (err as any)?.message ?? err));
   }

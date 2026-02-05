@@ -1,7 +1,8 @@
 import { callOpenAI, type OpenAIResult } from './openai.js';
 import { callGithubModels, type GithubModelsResult } from './github-models.js';
+import { callGemini, type GeminiResult } from './google-gemini.js';
 
-export type LLMProvider = 'openai' | 'github-models';
+export type LLMProvider = 'openai' | 'github-models' | 'google';
 
 export type LLMMessage = {
   role: 'system' | 'user' | 'assistant' | 'developer';
@@ -17,6 +18,7 @@ export type LLMRequest = {
   // auth
   openaiApiKey?: string;
   githubToken?: string;
+  googleApiKey?: string;
 
   timeoutMs?: number;
   maxRetries?: number;
@@ -95,6 +97,24 @@ export async function callLLM(req: LLMRequest): Promise<LLMResult> {
     });
 
     return r;
+  }
+
+  if (req.provider === 'google') {
+    if (!req.googleApiKey) throw new Error('googleApiKey is required for provider=google');
+
+    const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> =
+      (req.messages as any) ?? (req.prompt ? [{ role: 'user', content: req.prompt }] : undefined);
+
+    if (!messages) throw new Error('Either messages or prompt is required for provider=google');
+
+    const r: GeminiResult = await callGemini({
+      apiKey: req.googleApiKey,
+      model: req.model,
+      messages,
+      timeoutMs,
+    });
+
+    return { text: r.text, raw: r.raw };
   }
 
   // exhaustive

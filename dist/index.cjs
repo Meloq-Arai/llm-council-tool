@@ -23505,7 +23505,7 @@ function getOctokit(token, options, ...additionalPlugins) {
 var import_promises = __toESM(require("node:fs/promises"), 1);
 var import_node_path = __toESM(require("node:path"), 1);
 
-// src/lib/openai.ts
+// src/lib/github-models.ts
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -23515,89 +23515,7 @@ function parseRetryAfterMs(h) {
   if (Number.isFinite(s) && s > 0) return Math.round(s * 1e3);
   return void 0;
 }
-function extractOutputText(data) {
-  if (!data) return "";
-  if (typeof data.output_text === "string" && data.output_text.trim()) return data.output_text;
-  const parts = (data.output ?? []).map((o) => (o?.content ?? []).map((c) => c?.text ?? "").join("")).filter((s) => s && String(s).trim());
-  if (parts.length) return parts.join("\n");
-  return "";
-}
-function extractUsage(data) {
-  const u = data?.usage;
-  if (!u) return void 0;
-  const inputTokens = Number.isFinite(u.input_tokens) ? Number(u.input_tokens) : void 0;
-  const outputTokens = Number.isFinite(u.output_tokens) ? Number(u.output_tokens) : void 0;
-  const totalTokens = Number.isFinite(u.total_tokens) ? Number(u.total_tokens) : void 0;
-  if (inputTokens || outputTokens || totalTokens) return { inputTokens, outputTokens, totalTokens };
-  return void 0;
-}
 function isRetryableStatus(status) {
-  return status === 429 || status >= 500 && status <= 599;
-}
-async function callOpenAI({ apiKey, model, prompt, timeoutMs = 12e4, maxRetries = 3, retryBaseDelayMs = 1e3 }) {
-  let lastErr;
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    const ac = new AbortController();
-    const t = setTimeout(() => ac.abort(), timeoutMs);
-    try {
-      const resp = await fetch("https://api.openai.com/v1/responses", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`
-        },
-        body: JSON.stringify({
-          model,
-          input: prompt
-        }),
-        signal: ac.signal
-      });
-      if (!resp.ok) {
-        const text2 = await resp.text().catch(() => "");
-        const err = new Error(`OpenAI API error: ${resp.status} ${resp.statusText}${text2 ? `
-${text2}` : ""}`);
-        if (attempt < maxRetries && isRetryableStatus(resp.status)) {
-          const retryAfterMs = parseRetryAfterMs(resp.headers.get("retry-after"));
-          const backoff = retryAfterMs ?? Math.round(retryBaseDelayMs * Math.pow(2, attempt) * (0.9 + Math.random() * 0.2));
-          await sleep(backoff);
-          continue;
-        }
-        throw err;
-      }
-      const data = await resp.json();
-      const text = extractOutputText(data);
-      return {
-        text: text || JSON.stringify(data, null, 2),
-        usage: extractUsage(data),
-        raw: data
-      };
-    } catch (e) {
-      lastErr = e;
-      const isAbort = e?.name === "AbortError";
-      if (attempt < maxRetries) {
-        const backoff = Math.round(retryBaseDelayMs * Math.pow(2, attempt) * (0.9 + Math.random() * 0.2));
-        await sleep(backoff);
-        continue;
-      }
-      throw isAbort ? new Error(`OpenAI request timed out after ${timeoutMs}ms`) : e;
-    } finally {
-      clearTimeout(t);
-    }
-  }
-  throw lastErr ?? new Error("OpenAI request failed");
-}
-
-// src/lib/github-models.ts
-function sleep2(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-function parseRetryAfterMs2(h) {
-  if (!h) return void 0;
-  const s = Number(h);
-  if (Number.isFinite(s) && s > 0) return Math.round(s * 1e3);
-  return void 0;
-}
-function isRetryableStatus2(status) {
   return status === 429 || status >= 500 && status <= 599;
 }
 function extractText(data) {
@@ -23605,7 +23523,7 @@ function extractText(data) {
   if (typeof t === "string" && t.trim()) return t;
   return "";
 }
-function extractUsage2(data) {
+function extractUsage(data) {
   const u = data?.usage;
   if (!u) return void 0;
   const inputTokens = Number.isFinite(u.prompt_tokens) ? Number(u.prompt_tokens) : void 0;
@@ -23664,10 +23582,10 @@ async function callGithubModels({
           `GitHub Models API error: ${resp.status} ${resp.statusText}${text2 ? `
 ${text2}` : ""}`
         );
-        if (attempt < maxRetries && isRetryableStatus2(resp.status)) {
-          const retryAfterMs = parseRetryAfterMs2(resp.headers.get("retry-after"));
+        if (attempt < maxRetries && isRetryableStatus(resp.status)) {
+          const retryAfterMs = parseRetryAfterMs(resp.headers.get("retry-after"));
           const backoff = retryAfterMs ?? Math.round(retryBaseDelayMs * Math.pow(2, attempt) * (0.9 + Math.random() * 0.2));
-          await sleep2(backoff);
+          await sleep(backoff);
           continue;
         }
         throw err;
@@ -23676,7 +23594,7 @@ ${text2}` : ""}`
       const text = extractText(data);
       return {
         text: text || JSON.stringify(data, null, 2),
-        usage: extractUsage2(data),
+        usage: extractUsage(data),
         raw: data
       };
     } catch (e) {
@@ -23684,7 +23602,7 @@ ${text2}` : ""}`
       const isAbort = e?.name === "AbortError";
       if (attempt < maxRetries) {
         const backoff = Math.round(retryBaseDelayMs * Math.pow(2, attempt) * (0.9 + Math.random() * 0.2));
-        await sleep2(backoff);
+        await sleep(backoff);
         continue;
       }
       throw isAbort ? new Error(`GitHub Models request timed out after ${timeoutMs}ms`) : e;
@@ -23695,48 +23613,37 @@ ${text2}` : ""}`
   throw lastErr ?? new Error("GitHub Models request failed");
 }
 
-// src/lib/llm.ts
-async function callLLM(req) {
-  const timeoutMs = req.timeoutMs;
-  const maxRetries = req.maxRetries;
-  const retryBaseDelayMs = req.retryBaseDelayMs;
-  if (req.provider === "openai") {
-    if (!req.openaiApiKey) throw new Error("openaiApiKey is required for provider=openai");
-    const prompt = req.prompt ?? (req.messages ? req.messages.map((m) => `${m.role.toUpperCase()}:
-${m.content}`).join("\n\n") : void 0);
-    if (!prompt) throw new Error("Either prompt or messages is required for provider=openai");
-    const r = await callOpenAI({
-      apiKey: req.openaiApiKey,
-      model: req.model,
-      prompt,
-      timeoutMs,
-      maxRetries,
-      retryBaseDelayMs
+// src/lib/redact.ts
+var SECRET_PATTERNS = [
+  { name: "OpenAI key", re: /\bsk-[A-Za-z0-9]{20,}\b/g },
+  { name: "GitHub token", re: /\bgho_[A-Za-z0-9_]{20,}\b/g },
+  { name: "Google API key", re: /\bAIza[0-9A-Za-z\-_]{20,}\b/g },
+  { name: "AWS access key", re: /\bAKIA[0-9A-Z]{16}\b/g },
+  // generic high-entropy-ish tokens
+  { name: "Long token", re: /\b[A-Za-z0-9_\-]{40,}\b/g }
+];
+function redactSecrets(text) {
+  let out = String(text ?? "");
+  const redactions = [];
+  for (const p of SECRET_PATTERNS) {
+    const before = out;
+    out = out.replace(p.re, (m) => {
+      redactions.push(p.name);
+      return `[REDACTED:${p.name}]`;
     });
-    return r;
+    if (before !== out) {
+    }
   }
-  if (req.provider === "github-models") {
-    if (!req.githubToken) throw new Error("githubToken is required for provider=github-models");
-    const messages = req.messages ?? (req.prompt ? [
-      {
-        role: "user",
-        content: req.prompt
-      }
-    ] : void 0);
-    if (!messages) throw new Error("Either messages or prompt is required for provider=github-models");
-    const r = await callGithubModels({
-      token: req.githubToken,
-      model: req.model,
-      messages,
-      timeoutMs,
-      maxRetries,
-      retryBaseDelayMs,
-      temperature: req.temperature,
-      maxTokens: req.maxTokens
-    });
-    return r;
-  }
-  throw new Error(`Unknown provider: ${req.provider}`);
+  return { text: out, redactions: [...new Set(redactions)] };
+}
+function shouldSkipFileByPath(filename) {
+  const f = String(filename || "").toLowerCase();
+  if (!f) return false;
+  if (f.endsWith(".env") || f.includes("/.env") || f.includes("\\.env")) return true;
+  if (f.endsWith(".pem") || f.endsWith(".key") || f.endsWith(".p12") || f.endsWith(".pfx")) return true;
+  if (f.includes("id_rsa") || f.includes("id_ed25519")) return true;
+  if (f.includes("secrets") || f.includes("secret")) return true;
+  return false;
 }
 
 // src/council/json.ts
@@ -23791,9 +23698,527 @@ function extractFirstJsonObject(text) {
   }
 }
 
+// src/council/schema.ts
+var FINAL_SCHEMA_VERSION = 3;
+
+// src/lib/cost-tier.ts
+function guessCostTier(model) {
+  const m = String(model || "").toLowerCase();
+  if (!m) return "medium";
+  if (m.includes("gpt-5") || m.includes("o1") || m.includes("opus") || m.includes("405b")) return "ultra";
+  if (m.includes("gpt-4o") || m.includes("sonnet") || m.includes("gpt-4.1")) return "high";
+  if (m.includes("gpt-4") || m.includes("70b") || m.includes("pro")) return "medium";
+  if (m.includes("mini") || m.includes("flash") || m.includes("haiku") || m.includes("8b") || m.includes("nemo")) return "low";
+  return "medium";
+}
+
+// src/council/render.ts
+function fmt(n) {
+  return Number.isFinite(n) ? String(n) : "?";
+}
+function tokensLine(usage) {
+  if (!usage) return "";
+  let totalIn = 0;
+  let totalOut = 0;
+  let total = 0;
+  for (const u of Object.values(usage)) {
+    if (!u) continue;
+    totalIn += Number(u.inputTokens ?? 0);
+    totalOut += Number(u.outputTokens ?? 0);
+    total += Number(u.totalTokens ?? 0);
+  }
+  if (!total && !totalIn && !totalOut) return "";
+  return `Tokens (all stages): in ${fmt(totalIn)} \xB7 out ${fmt(totalOut)} \xB7 total ${fmt(total)}`;
+}
+function renderIssue(i) {
+  const loc = i.line_range ? `:${i.line_range.start}-${i.line_range.end}` : "";
+  const conf = `${Math.round(i.confidence * 100)}%`;
+  return [
+    `- **${i.title}** \u2014 _${i.severity}/${i.category}_ (conf ${conf})`,
+    `  - Location: \`${i.file}${loc}\``,
+    `  - Why: ${i.why_this_matters}`,
+    `  - Evidence: ${i.evidence}`,
+    `  - Suggestion: ${i.suggestion}`
+  ].join("\n");
+}
+function renderMarkdown(out) {
+  const marker = "<!-- llm-council-tool -->";
+  const models = out.models;
+  const stageModels = [
+    ...models.reviewers.map((m) => `reviewer:${m}(${guessCostTier(m)})`),
+    `judge:${models.judge}(${guessCostTier(models.judge)})`,
+    `verifier:${models.verifier}(${guessCostTier(models.verifier)})`,
+    ...models.verifier2 ? [`verifier2:${models.verifier2}(${guessCostTier(models.verifier2)})`] : [],
+    ...models.critic ? [`critic:${models.critic}(${guessCostTier(models.critic)})`] : [],
+    ...models.finalizer ? [`finalizer:${models.finalizer}(${guessCostTier(models.finalizer)})`] : []
+  ].join(" \xB7 ");
+  const lines = [];
+  lines.push(marker);
+  lines.push("## \u{1F916} LLM Council Review");
+  lines.push("");
+  lines.push(stageModels);
+  lines.push("");
+  const tl = tokensLine(out.usage);
+  if (tl) {
+    lines.push(tl);
+    lines.push("");
+  }
+  lines.push(`Confirmed: **${out.summary.confirmedCount}** \xB7 Uncertain: **${out.summary.uncertainCount}**`);
+  if (out.summary.truncatedDiff) lines.push(`(Diff truncated)`);
+  lines.push("");
+  lines.push("### Confirmed issues");
+  lines.push("");
+  if (!out.issues.confirmed.length) lines.push("- (none)");
+  for (const i of out.issues.confirmed) lines.push(renderIssue(i));
+  lines.push("");
+  lines.push("### Uncertain / needs human check");
+  lines.push("");
+  if (!out.issues.uncertain.length) lines.push("- (none)");
+  for (const i of out.issues.uncertain) lines.push(renderIssue(i));
+  lines.push("");
+  if (out.usage) {
+    lines.push("<details>");
+    lines.push("<summary>Tokens per stage</summary>");
+    lines.push("");
+    lines.push("```json");
+    lines.push(JSON.stringify(out.usage, null, 2));
+    lines.push("```");
+    lines.push("</details>");
+  }
+  return lines.join("\n");
+}
+
+// src/lib/openai.ts
+function sleep2(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+function parseRetryAfterMs2(h) {
+  if (!h) return void 0;
+  const s = Number(h);
+  if (Number.isFinite(s) && s > 0) return Math.round(s * 1e3);
+  return void 0;
+}
+function extractOutputText(data) {
+  if (!data) return "";
+  if (typeof data.output_text === "string" && data.output_text.trim()) return data.output_text;
+  const parts = (data.output ?? []).map((o) => (o?.content ?? []).map((c) => c?.text ?? "").join("")).filter((s) => s && String(s).trim());
+  if (parts.length) return parts.join("\n");
+  return "";
+}
+function extractUsage2(data) {
+  const u = data?.usage;
+  if (!u) return void 0;
+  const inputTokens = Number.isFinite(u.input_tokens) ? Number(u.input_tokens) : void 0;
+  const outputTokens = Number.isFinite(u.output_tokens) ? Number(u.output_tokens) : void 0;
+  const totalTokens = Number.isFinite(u.total_tokens) ? Number(u.total_tokens) : void 0;
+  if (inputTokens || outputTokens || totalTokens) return { inputTokens, outputTokens, totalTokens };
+  return void 0;
+}
+function isRetryableStatus2(status) {
+  return status === 429 || status >= 500 && status <= 599;
+}
+async function callOpenAI({ apiKey, model, prompt, timeoutMs = 12e4, maxRetries = 3, retryBaseDelayMs = 1e3 }) {
+  let lastErr;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), timeoutMs);
+    try {
+      const resp = await fetch("https://api.openai.com/v1/responses", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`
+        },
+        body: JSON.stringify({
+          model,
+          input: prompt
+        }),
+        signal: ac.signal
+      });
+      if (!resp.ok) {
+        const text2 = await resp.text().catch(() => "");
+        const err = new Error(`OpenAI API error: ${resp.status} ${resp.statusText}${text2 ? `
+${text2}` : ""}`);
+        if (attempt < maxRetries && isRetryableStatus2(resp.status)) {
+          const retryAfterMs = parseRetryAfterMs2(resp.headers.get("retry-after"));
+          const backoff = retryAfterMs ?? Math.round(retryBaseDelayMs * Math.pow(2, attempt) * (0.9 + Math.random() * 0.2));
+          await sleep2(backoff);
+          continue;
+        }
+        throw err;
+      }
+      const data = await resp.json();
+      const text = extractOutputText(data);
+      return {
+        text: text || JSON.stringify(data, null, 2),
+        usage: extractUsage2(data),
+        raw: data
+      };
+    } catch (e) {
+      lastErr = e;
+      const isAbort = e?.name === "AbortError";
+      if (attempt < maxRetries) {
+        const backoff = Math.round(retryBaseDelayMs * Math.pow(2, attempt) * (0.9 + Math.random() * 0.2));
+        await sleep2(backoff);
+        continue;
+      }
+      throw isAbort ? new Error(`OpenAI request timed out after ${timeoutMs}ms`) : e;
+    } finally {
+      clearTimeout(t);
+    }
+  }
+  throw lastErr ?? new Error("OpenAI request failed");
+}
+
+// src/lib/google-gemini.ts
+function toGeminiContents(messages) {
+  const contents = [];
+  for (const m of messages) {
+    const role = m.role === "assistant" ? "model" : "user";
+    const parts = [{ text: m.content }];
+    contents.push({ role, parts });
+  }
+  return contents;
+}
+async function callGemini({ apiKey, model, messages, timeoutMs = 12e4 }) {
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        contents: toGeminiContents(messages),
+        generationConfig: {
+          temperature: 0.2
+        }
+      }),
+      signal: ac.signal
+    });
+    if (!resp.ok) {
+      const text2 = await resp.text().catch(() => "");
+      throw new Error(`Gemini API error: ${resp.status} ${resp.statusText}${text2 ? `
+${text2}` : ""}`);
+    }
+    const data = await resp.json();
+    const text = data?.candidates?.[0]?.content?.parts?.map((p) => p?.text ?? "").join("") ?? "";
+    return { text: String(text || "").trim() || JSON.stringify(data, null, 2), raw: data };
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+// src/lib/llm.ts
+async function callLLM(req) {
+  const timeoutMs = req.timeoutMs;
+  const maxRetries = req.maxRetries;
+  const retryBaseDelayMs = req.retryBaseDelayMs;
+  if (req.provider === "openai") {
+    if (!req.openaiApiKey) throw new Error("openaiApiKey is required for provider=openai");
+    const prompt = req.prompt ?? (req.messages ? req.messages.map((m) => `${m.role.toUpperCase()}:
+${m.content}`).join("\n\n") : void 0);
+    if (!prompt) throw new Error("Either prompt or messages is required for provider=openai");
+    const r = await callOpenAI({
+      apiKey: req.openaiApiKey,
+      model: req.model,
+      prompt,
+      timeoutMs,
+      maxRetries,
+      retryBaseDelayMs
+    });
+    return r;
+  }
+  if (req.provider === "github-models") {
+    if (!req.githubToken) throw new Error("githubToken is required for provider=github-models");
+    const messages = req.messages ?? (req.prompt ? [
+      {
+        role: "user",
+        content: req.prompt
+      }
+    ] : void 0);
+    if (!messages) throw new Error("Either messages or prompt is required for provider=github-models");
+    const r = await callGithubModels({
+      token: req.githubToken,
+      model: req.model,
+      messages,
+      timeoutMs,
+      maxRetries,
+      retryBaseDelayMs,
+      temperature: req.temperature,
+      maxTokens: req.maxTokens
+    });
+    return r;
+  }
+  if (req.provider === "google") {
+    if (!req.googleApiKey) throw new Error("googleApiKey is required for provider=google");
+    const messages = req.messages ?? (req.prompt ? [{ role: "user", content: req.prompt }] : void 0);
+    if (!messages) throw new Error("Either messages or prompt is required for provider=google");
+    const r = await callGemini({
+      apiKey: req.googleApiKey,
+      model: req.model,
+      messages,
+      timeoutMs
+    });
+    return { text: r.text, raw: r.raw };
+  }
+  throw new Error(`Unknown provider: ${req.provider}`);
+}
+
+// src/council/pipeline-v2.ts
+function clamp01(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return 0;
+  return Math.max(0, Math.min(1, x));
+}
+function safeArray(x) {
+  return Array.isArray(x) ? x : [];
+}
+function normalizeIssue(x, idx) {
+  return {
+    issue_id: String(x.issue_id || x.id || `I${idx + 1}`),
+    title: String(x.title || "Untitled"),
+    severity: ["critical", "high", "medium", "low"].includes(String(x.severity)) ? String(x.severity) : "medium",
+    category: String(x.category || "general"),
+    file: String(x.file || (Array.isArray(x.files) ? x.files[0] : "") || ""),
+    line_range: x.line_range && typeof x.line_range === "object" ? {
+      start: Number(x.line_range.start ?? x.line_range.from ?? 0) || 0,
+      end: Number(x.line_range.end ?? x.line_range.to ?? x.line_range.start ?? 0) || 0,
+      side: x.line_range.side === "LEFT" ? "LEFT" : "RIGHT"
+    } : void 0,
+    why_this_matters: String(x.why_this_matters || x.why || ""),
+    description: String(x.description || ""),
+    evidence: String(x.evidence || ""),
+    suggestion: String(x.suggestion || ""),
+    confidence: clamp01(x.confidence),
+    risk: clamp01(x.risk),
+    fix_effort: ["xs", "s", "m", "l"].includes(String(x.fix_effort)) ? String(x.fix_effort) : "m",
+    tags: safeArray(x.tags).map((t) => String(t)).slice(0, 20)
+  };
+}
+async function callStage(cfg, label, spec, messages) {
+  const r = await callLLM({
+    provider: spec.provider,
+    model: spec.model,
+    messages,
+    githubToken: cfg.githubToken,
+    openaiApiKey: cfg.openaiApiKey,
+    googleApiKey: cfg.googleApiKey,
+    timeoutMs: 24e4,
+    maxRetries: 3
+  });
+  return r;
+}
+async function runCouncil(cfg) {
+  const usage = {};
+  const reviewerSystem = `You are a top-tier senior software engineer doing PR review.
+Find high-signal problems (correctness, security, edge cases, maintainability).
+You MUST quote exact evidence from the diff for every issue.
+
+Output JSON ONLY (no markdown, no code fences).
+Schema: {"schemaVersion":1,"issues":[{"issue_id":string,"title":string,"severity":"critical"|"high"|"medium"|"low","category":string,"file":string,"line_range":{"start":number,"end":number,"side":"RIGHT"|"LEFT"},"why_this_matters":string,"description":string,"evidence":string,"suggestion":string,"risk":number,"fix_effort":"xs"|"s"|"m"|"l"}]}`;
+  const reviewerUser = `Diff:
+
+${cfg.diffText}`;
+  const reviewerOutputs = [];
+  const usedReviewers = [];
+  const isUnknownModel = (e) => /unknown_model/i.test(String(e?.message ?? e ?? "")) || /"code"\s*:\s*"unknown_model"/i.test(String(e?.message ?? ""));
+  for (let i = 0; i < cfg.reviewers.length; i++) {
+    if (usedReviewers.length >= 3) break;
+    const spec = cfg.reviewers[i];
+    const label = `reviewer_${usedReviewers.length + 1}_${spec.provider}:${spec.model}`;
+    try {
+      const r = await callStage(cfg, label, spec, [
+        { role: "system", content: reviewerSystem },
+        { role: "user", content: reviewerUser }
+      ]);
+      usage[label] = r.usage;
+      reviewerOutputs.push({ model: `${spec.provider}:${spec.model}`, text: r.text, json: extractFirstJsonObject(r.text) });
+      usedReviewers.push(spec);
+    } catch (e) {
+      if (spec.provider === "github-models" && isUnknownModel(e)) {
+        warning(`Reviewer model rejected as unknown: ${spec.model} (skipping)`);
+        continue;
+      }
+      throw e;
+    }
+  }
+  if (usedReviewers.length < 2) {
+    throw new Error(`Not enough reviewer models available (got ${usedReviewers.length}).`);
+  }
+  const judgeSystem = `You are the judge. Dedupe and consolidate reviewer issues.
+Remove weak / unsupported / repetitive items.
+Every issue MUST include exact evidence quoted from diff.
+
+Output JSON ONLY. SchemaVersion=1. issues[].issue_id must be stable short ids (I1,I2,...).
+Return up to 25 issues.`;
+  const judgeUser = `Diff:
+
+${cfg.diffText}
+
+` + reviewerOutputs.map((o, idx) => `REVIEWER_${idx + 1} (${o.model}):
+${o.json ? JSON.stringify(o.json) : o.text}`).join("\n\n");
+  const judgeLabel = `judge_${cfg.judge.provider}:${cfg.judge.model}`;
+  const judgeRes = await callStage(cfg, judgeLabel, cfg.judge, [
+    { role: "system", content: judgeSystem },
+    { role: "user", content: judgeUser }
+  ]);
+  usage[judgeLabel] = judgeRes.usage;
+  let judgeJson = extractFirstJsonObject(judgeRes.text);
+  if (cfg.critic) {
+    const criticSystem = `You are a strict critic. Validate each issue is supported by the diff.
+Remove anything speculative. Tighten wording. Keep only high-signal items.
+
+Output JSON ONLY with same schema.`;
+    const criticUser = `Diff:
+
+${cfg.diffText}
+
+Current issues:
+
+${JSON.stringify(judgeJson, null, 2)}`;
+    const criticLabel = `critic_${cfg.critic.provider}:${cfg.critic.model}`;
+    const criticRes = await callStage(cfg, criticLabel, cfg.critic, [
+      { role: "system", content: criticSystem },
+      { role: "user", content: criticUser }
+    ]);
+    usage[criticLabel] = criticRes.usage;
+    judgeJson = extractFirstJsonObject(criticRes.text) ?? judgeJson;
+  }
+  const judgeIssuesRaw = safeArray(judgeJson?.issues).slice(0, 25);
+  const judgeIssues = judgeIssuesRaw.map(normalizeIssue);
+  const verifierSystem = `You are a confidence checker. For each issue, verify it against the diff.
+If not clearly supported, mark unconfirmed with low confidence.
+You MUST quote evidence from the diff in your response.
+
+Output JSON ONLY: {"schemaVersion":1,"results":[{"issue_id":string,"confirmed":boolean,"confidence":number,"note":string,"evidence":string}]}`;
+  const verifierUser = `Diff:
+
+${cfg.diffText}
+
+Issues:
+
+${JSON.stringify(judgeIssues, null, 2)}`;
+  const verifyOnce = async (spec, label) => {
+    const res = await callStage(cfg, label, spec, [
+      { role: "system", content: verifierSystem },
+      { role: "user", content: verifierUser }
+    ]);
+    usage[label] = res.usage;
+    const json = extractFirstJsonObject(res.text);
+    return json;
+  };
+  const v1 = await verifyOnce(cfg.verifier, `verifier_${cfg.verifier.provider}:${cfg.verifier.model}`);
+  const v2 = cfg.verifier2 ? await verifyOnce(cfg.verifier2, `verifier2_${cfg.verifier2.provider}:${cfg.verifier2.model}`) : null;
+  const toMap = (vj) => {
+    const m = /* @__PURE__ */ new Map();
+    for (const r of safeArray(vj?.results)) {
+      const id = String(r.issue_id || r.id || "").trim();
+      if (!id) continue;
+      m.set(id, { confirmed: Boolean(r.confirmed), confidence: clamp01(r.confidence) });
+    }
+    return m;
+  };
+  const m1 = toMap(v1);
+  const m2 = v2 ? toMap(v2) : null;
+  const confirmed = [];
+  const uncertain = [];
+  for (const i of judgeIssues) {
+    const a = m1.get(i.issue_id);
+    const b = m2?.get(i.issue_id);
+    const conf = a?.confidence ?? 0;
+    const conf2 = b?.confidence;
+    const combinedConfirmed = b ? a?.confirmed && b?.confirmed && Math.min(conf, conf2 ?? 0) >= cfg.minConfidence || (a?.confirmed || b?.confirmed) && Math.max(conf, conf2 ?? 0) >= Math.max(0.85, cfg.minConfidence) : Boolean(a?.confirmed) && conf >= cfg.minConfidence;
+    const finalIssue = {
+      ...i,
+      confidence: b ? Math.max(conf, conf2 ?? 0) : conf
+    };
+    (combinedConfirmed ? confirmed : uncertain).push(finalIssue);
+  }
+  const final = {
+    schemaVersion: FINAL_SCHEMA_VERSION,
+    summary: {
+      confirmedCount: confirmed.length,
+      uncertainCount: uncertain.length,
+      truncatedDiff: cfg.truncatedDiff
+    },
+    issues: {
+      confirmed,
+      uncertain
+    },
+    models: {
+      reviewers: usedReviewers.map((s) => `${s.provider}:${s.model}`),
+      judge: `${cfg.judge.provider}:${cfg.judge.model}`,
+      verifier: `${cfg.verifier.provider}:${cfg.verifier.model}`,
+      ...cfg.verifier2 ? { verifier2: `${cfg.verifier2.provider}:${cfg.verifier2.model}` } : {},
+      ...cfg.critic ? { critic: `${cfg.critic.provider}:${cfg.critic.model}` } : {},
+      ...cfg.finalizer ? { finalizer: `${cfg.finalizer.provider}:${cfg.finalizer.model}` } : {}
+    },
+    usage
+  };
+  const markdown = renderMarkdown(final);
+  return { final, markdown, usage };
+}
+
+// src/council/labels.ts
+function labelsForIssues(issues) {
+  const set = /* @__PURE__ */ new Set();
+  const add = (x) => {
+    const s = x.trim();
+    if (s) set.add(s);
+  };
+  for (const i of issues) {
+    const c = String(i.category || "").toLowerCase();
+    const title = String(i.title || "").toLowerCase();
+    const tags = (i.tags ?? []).map((t) => String(t).toLowerCase());
+    if (c.includes("security") || title.includes("xss") || title.includes("csrf") || title.includes("injection")) {
+      add("needs-security-review");
+    }
+    if (c.includes("regex") || title.includes("redos") || title.includes("catastrophic backtracking")) {
+      add("has-potential-regex-redos");
+    }
+    if (c.includes("perf") || title.includes("performance")) {
+      add("has-performance-risk");
+    }
+    if (tags.includes("breaking-change")) {
+      add("possible-breaking-change");
+    }
+  }
+  return [...set];
+}
+
+// src/council/pr-comments.ts
+function issuesToInlineComments(issues) {
+  const out = [];
+  for (const i of issues) {
+    if (!i.file) continue;
+    const lr = i.line_range;
+    if (!lr?.start) continue;
+    out.push({
+      path: i.file,
+      line: lr.start,
+      body: `**${i.title}** (_${i.severity}/${i.category}_, conf ${(i.confidence * 100).toFixed(0)}%)
+
+Evidence: ${i.evidence}
+
+Suggestion: ${i.suggestion}`
+    });
+  }
+  const seen = /* @__PURE__ */ new Set();
+  return out.filter((c) => {
+    const k = `${c.path}::${c.line}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+
 // src/index.ts
 function shouldReviewFile(f) {
   const lower = f.filename.toLowerCase();
+  if (shouldSkipFileByPath(lower)) return false;
   if (lower.endsWith(".lock")) return false;
   if (lower.endsWith("package-lock.json")) return false;
   if (lower.endsWith("pnpm-lock.yaml")) return false;
@@ -23807,6 +24232,10 @@ function shouldReviewFile(f) {
 }
 function parseCsvList(s) {
   return (s || "").split(",").map((x) => x.trim()).filter(Boolean);
+}
+function parseBool(s, def = false) {
+  if (s == null || s === "") return def;
+  return ["1", "true", "yes", "on"].includes(String(s).toLowerCase());
 }
 function sleep3(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -23859,31 +24288,33 @@ async function writeOutputs(params) {
   setOutput("diff_path", import_node_path.default.relative(workspace, diffPath));
   setOutput("meta_path", import_node_path.default.relative(workspace, metaPath));
 }
-function toMarkdownIssue(i, v) {
-  const conf = v ? ` (confidence ${(v.confidence * 100).toFixed(0)}%)` : "";
-  const header = `- **${i.title}** \u2014 _${i.severity}/${i.category}_${conf}`;
-  const lines = [header];
-  if (i.files?.length) lines.push(`  - Files: ${i.files.join(", ")}`);
-  if (i.description) lines.push(`  - ${i.description}`);
-  if (v?.evidence || i.evidence) lines.push(`  - Evidence: ${v?.evidence ?? i.evidence}`);
-  if (i.suggestion) lines.push(`  - Suggestion: ${i.suggestion}`);
-  if (v?.note) lines.push(`  - Note: ${v.note}`);
-  return lines.join("\n");
+function parseModelSpec(s, defaultProvider) {
+  const raw = String(s || "").trim();
+  const m = raw.match(/^([a-zA-Z0-9\-]+)\s*:\s*(.+)$/);
+  if (m) {
+    return { provider: m[1], model: m[2].trim() };
+  }
+  return { provider: defaultProvider, model: raw };
 }
-async function run() {
+async function main() {
   const ghToken = getInput("github_token") || process.env.GITHUB_TOKEN;
   if (!ghToken) throw new Error("GitHub token is missing (github_token input / GITHUB_TOKEN env)");
-  const provider = getInput("llm_provider") || "github-models";
+  const defaultProvider = getInput("llm_provider") || "github-models";
   const openaiApiKey = getInput("openai_api_key") || process.env.OPENAI_API_KEY;
-  const reviewModels = parseCsvList(getInput("review_models"));
-  let judgeModel = getInput("judge_model") || "gpt-4o";
-  let verifierModel = getInput("verifier_model") || "gpt-4o-mini";
+  const googleApiKey = getInput("google_api_key") || process.env.GOOGLE_API_KEY;
+  const reviewModelsRaw = parseCsvList(getInput("review_models"));
+  const judgeModelRaw = getInput("judge_model") || "gpt-4o";
+  const verifierModelRaw = getInput("verifier_model") || "gpt-4o-mini";
+  const verifier2ModelRaw = getInput("verifier2_model");
+  const criticModelRaw = getInput("critic_model");
   const maxFiles = Number(getInput("max_files") || "25");
   const maxPatchChars = Number(getInput("max_patch_chars") || "6000");
   const maxTotalChars = Number(getInput("max_total_chars") || "120000");
-  const minConfidence = Number(getInput("min_confidence") || "0.55");
-  const outputDir = getInput("output_dir") || ".llm-council-tool";
+  const minConfidence = Number(getInput("min_confidence") || "0.6");
+  const outputDir = getInput("output_dir") || "llm-council-tool-out";
   const writeFiles = (getInput("write_files") || "true").toLowerCase() !== "false";
+  const addLabels = parseBool(getInput("add_labels"), true);
+  const addInline = parseBool(getInput("add_inline_comments"), false);
   const ctx = context2;
   if (ctx.eventName !== "pull_request" && ctx.eventName !== "pull_request_target") {
     info(`Skipping: event ${ctx.eventName} not supported.`);
@@ -23891,8 +24322,9 @@ async function run() {
   }
   const pr = ctx.payload.pull_request;
   if (!pr) throw new Error("No pull_request in context payload");
-  const { owner, repo } = ctx.repo;
   const prNumber = pr.number;
+  const headSha = pr.head?.sha;
+  const { owner, repo } = ctx.repo;
   const octokit = getOctokit(ghToken);
   const files = [];
   let page = 1;
@@ -23918,13 +24350,16 @@ async function run() {
   const parts = [];
   let total = 0;
   let truncated = false;
+  const redactionKinds = /* @__PURE__ */ new Set();
   for (const f of selected) {
-    const patch = (f.patch || "").slice(0, maxPatchChars);
+    const patchRaw = (f.patch || "").slice(0, maxPatchChars);
+    const red = redactSecrets(patchRaw);
+    red.redactions.forEach((x) => redactionKinds.add(x));
     const block = `FILE: ${f.filename}
 STATUS: ${f.status}
 CHANGES: +${f.additions}/-${f.deletions}
 PATCH:
-${patch || "[no patch provided by GitHub]"}
+${red.text || "[no patch provided by GitHub]"}
 `;
     if (total + block.length > maxTotalChars) {
       truncated = true;
@@ -23934,273 +24369,52 @@ ${patch || "[no patch provided by GitHub]"}
     total += block.length;
   }
   const diffText = parts.join("\n---\n");
-  const llmAuth = {
-    provider,
-    githubToken: ghToken,
-    openaiApiKey
-  };
-  let resolvedReviewModels = reviewModels;
-  let resolvedJudgeModel = judgeModel;
-  let resolvedVerifierModel = verifierModel;
-  if (provider === "github-models") {
+  const resolveForGithubModels = async (names) => {
     const available = await listGithubModels(ghToken);
     const nameMap = /* @__PURE__ */ new Map();
     for (const m of available) {
       const n = String(m.name || "").trim();
-      if (!n) continue;
-      nameMap.set(n.toLowerCase(), n);
+      if (n) nameMap.set(n.toLowerCase(), n);
     }
-    const canonicalize = (name) => {
-      const key = String(name || "").trim().toLowerCase();
-      return key ? nameMap.get(key) ?? null : null;
-    };
-    const fallbackPool = [
-      "gpt-4o",
-      "Meta-Llama-3.1-405B-Instruct",
-      "Meta-Llama-3.1-70B-Instruct",
-      "Meta-Llama-3-70B-Instruct",
-      "AI21-Jamba-Instruct",
-      "Mistral-large-2407",
-      "gpt-4o-mini"
-    ];
-    const pick = (requested, count) => {
-      const out = [];
-      const seen = /* @__PURE__ */ new Set();
-      const add = (n) => {
-        if (!n) return;
-        const k = n.toLowerCase();
-        if (seen.has(k)) return;
-        seen.add(k);
-        out.push(n);
-      };
-      for (const r of requested) add(canonicalize(r));
-      for (const f of fallbackPool) add(canonicalize(f));
-      return out.slice(0, count);
-    };
-    resolvedReviewModels = pick(reviewModels, 8);
-    resolvedJudgeModel = canonicalize(judgeModel) ?? pick([judgeModel], 2)[0] ?? "gpt-4o";
-    resolvedVerifierModel = canonicalize(verifierModel) ?? pick([verifierModel], 2)[0] ?? "gpt-4o-mini";
-    info(
-      `Resolved GitHub Models: reviewers=[${resolvedReviewModels.join(", ")}], judge=${resolvedJudgeModel}, verifier=${resolvedVerifierModel}`
-    );
-  }
-  const usage = {};
-  async function call(model, messages, label) {
-    const r = await callLLM({
-      provider: llmAuth.provider,
-      model,
-      messages,
-      openaiApiKey: llmAuth.openaiApiKey,
-      githubToken: llmAuth.githubToken,
-      timeoutMs: 24e4,
-      maxRetries: 3
-    });
-    usage[label] = r.usage;
-    return r;
-  }
-  const reviewerSystem = `You are a top-tier senior software engineer doing PR review.
-Goal: find high-signal problems (correctness, security, edge cases, maintainability).
-
-Output JSON ONLY (no markdown, no code fences).
-Schema:
-{
-  "schemaVersion": 1,
-  "issues": [
-    {
-      "title": string,
-      "severity": "critical"|"high"|"medium"|"low",
-      "category": string,
-      "files": string[],
-      "description": string,
-      "evidence": string,
-      "suggestion": string
+    return names.map((n) => nameMap.get(String(n).toLowerCase()) ?? n);
+  };
+  const reviewersSpecs = [];
+  const reviewerItems = reviewModelsRaw.length ? reviewModelsRaw : ["gpt-4o", "Meta-Llama-3.1-405B-Instruct", "gpt-4o-mini"];
+  let reviewerModelsResolved = reviewerItems;
+  if (defaultProvider === "github-models") reviewerModelsResolved = await resolveForGithubModels(reviewerModelsResolved);
+  for (const r of reviewerModelsResolved) reviewersSpecs.push(parseModelSpec(r, defaultProvider));
+  let judgeSpec = parseModelSpec(judgeModelRaw, defaultProvider);
+  let verifierSpec = parseModelSpec(verifierModelRaw, defaultProvider);
+  let verifier2Spec = verifier2ModelRaw ? parseModelSpec(verifier2ModelRaw, defaultProvider) : void 0;
+  let criticSpec = criticModelRaw ? parseModelSpec(criticModelRaw, defaultProvider) : void 0;
+  if (defaultProvider === "github-models") {
+    const [j2] = await resolveForGithubModels([judgeSpec.model]);
+    judgeSpec = { ...judgeSpec, model: j2 };
+    const [v2] = await resolveForGithubModels([verifierSpec.model]);
+    verifierSpec = { ...verifierSpec, model: v2 };
+    if (verifier2Spec) {
+      const [vv] = await resolveForGithubModels([verifier2Spec.model]);
+      verifier2Spec = { ...verifier2Spec, model: vv };
     }
-  ]
-}`;
-  const reviewerUser = `Review the following PR diffs. Quote evidence from the PATCH when possible.
-
-${diffText}`;
-  const reviewerResults = [];
-  const reviewerCandidates = resolvedReviewModels.length ? resolvedReviewModels : ["gpt-4o", "Meta-Llama-3.1-405B-Instruct", "gpt-4o-mini"];
-  const models3 = [];
-  const isUnknownModel = (e) => /unknown_model/i.test(String(e?.message ?? e ?? "")) || /"code"\s*:\s*"unknown_model"/i.test(String(e?.message ?? ""));
-  for (const candidate of reviewerCandidates) {
-    if (models3.length >= 3) break;
-    try {
-      const r = await call(
-        candidate,
-        [
-          { role: "system", content: reviewerSystem },
-          { role: "user", content: reviewerUser }
-        ],
-        `reviewer_${models3.length + 1}_${candidate}`
-      );
-      const parsed = extractFirstJsonObject(r.text);
-      reviewerResults.push({ model: candidate, rawText: r.text, parsed, usage: r.usage });
-      models3.push(candidate);
-    } catch (e) {
-      if (provider === "github-models" && isUnknownModel(e)) {
-        warning(`Reviewer model rejected as unknown: ${candidate} (will fallback)`);
-        continue;
-      }
-      throw e;
+    if (criticSpec) {
+      const [cc] = await resolveForGithubModels([criticSpec.model]);
+      criticSpec = { ...criticSpec, model: cc };
     }
   }
-  if (models3.length < 2) {
-    throw new Error(
-      `Not enough reviewer models available to run council (got ${models3.length}). Try adjusting review_models or repo entitlements.`
-    );
-  }
-  const judgeSystem = `You are the judge model. You receive 3 reviewer JSON outputs and the raw diff.
-Task: deduplicate, remove repetition, fix obvious mistakes, and output a single consolidated list of issues.
-Prefer fewer, higher-signal issues with strong evidence.
-
-Output JSON ONLY (no markdown, no code fences).
-Schema:
-{
-  "schemaVersion": 1,
-  "issues": [
-    {
-      "id": string,
-      "title": string,
-      "severity": "critical"|"high"|"medium"|"low",
-      "category": string,
-      "files": string[],
-      "description": string,
-      "evidence": string,
-      "suggestion": string
-    }
-  ]
-}`;
-  const judgeUser = `Diff:
-
-${diffText}
-
-Reviewer outputs (may be imperfect):
-
-` + reviewerResults.map((rr, idx) => {
-    const payload = rr.parsed ? JSON.stringify(rr.parsed) : rr.rawText;
-    return `REVIEWER_${idx + 1} (${rr.model}):
-${payload}`;
-  }).join("\n\n");
-  const judgeRes = await call(
-    resolvedJudgeModel,
-    [
-      { role: "system", content: judgeSystem },
-      { role: "user", content: judgeUser }
-    ],
-    `judge_${resolvedJudgeModel}`
-  );
-  const judgeParsed = extractFirstJsonObject(judgeRes.text);
-  const judgeIssues = Array.isArray(judgeParsed?.issues) ? judgeParsed.issues.map((x, idx) => ({
-    id: String(x.id || `I${idx + 1}`),
-    title: String(x.title || "Untitled"),
-    severity: ["critical", "high", "medium", "low"].includes(String(x.severity)) ? String(x.severity) : "medium",
-    category: String(x.category || "general"),
-    files: Array.isArray(x.files) ? x.files.map((f) => String(f)) : [],
-    description: String(x.description || ""),
-    evidence: typeof x.evidence === "string" ? x.evidence : void 0,
-    suggestion: typeof x.suggestion === "string" ? x.suggestion : void 0
-  })).slice(0, 30) : [];
-  const verifierSystem = `You are a strict confidence checker. You must verify each proposed issue against the diff.
-If the diff does NOT support an issue, mark it unconfirmed with low confidence.
-
-Output JSON ONLY (no markdown, no code fences).
-Schema:
-{
-  "schemaVersion": 1,
-  "results": [
-    { "id": string, "confirmed": boolean, "confidence": number, "note": string, "evidence": string }
-  ]
-}`;
-  const verifierUser = `Diff:
-
-${diffText}
-
-Issues to verify:
-
-` + JSON.stringify(
-    judgeIssues.map((i) => ({
-      id: i.id,
-      title: i.title,
-      severity: i.severity,
-      category: i.category,
-      files: i.files,
-      description: i.description,
-      evidence: i.evidence,
-      suggestion: i.suggestion
-    })),
-    null,
-    2
-  );
-  const verifierRes = await call(
-    resolvedVerifierModel,
-    [
-      { role: "system", content: verifierSystem },
-      { role: "user", content: verifierUser }
-    ],
-    `verifier_${resolvedVerifierModel}`
-  );
-  const verifierParsed = extractFirstJsonObject(verifierRes.text);
-  const verifierMap = /* @__PURE__ */ new Map();
-  if (Array.isArray(verifierParsed?.results)) {
-    for (const r of verifierParsed.results) {
-      const id = String(r.id ?? "").trim();
-      if (!id) continue;
-      const confidence = Math.max(0, Math.min(1, Number(r.confidence ?? 0)));
-      verifierMap.set(id, {
-        confirmed: Boolean(r.confirmed),
-        confidence,
-        note: typeof r.note === "string" ? r.note : void 0,
-        evidence: typeof r.evidence === "string" ? r.evidence : void 0
-      });
-    }
-  }
-  const confirmed = [];
-  const uncertain = [];
-  for (const i of judgeIssues) {
-    const v = verifierMap.get(i.id);
-    const c = v?.confidence ?? 0;
-    const ok = Boolean(v?.confirmed) && c >= minConfidence;
-    (ok ? confirmed : uncertain).push(i);
-  }
+  const { final, markdown, usage } = await runCouncil({
+    githubToken: ghToken,
+    openaiApiKey,
+    googleApiKey,
+    reviewers: reviewersSpecs.slice(0, 3),
+    judge: judgeSpec,
+    verifier: verifierSpec,
+    verifier2: verifier2Spec,
+    critic: criticSpec,
+    minConfidence,
+    diffText,
+    truncatedDiff: truncated
+  });
   const marker = "<!-- llm-council-tool -->";
-  const modelsLine = `Reviewers: ${models3.join(", ")} \xB7 Judge: ${resolvedJudgeModel} \xB7 Verifier: ${resolvedVerifierModel}`;
-  const mdLines = [];
-  mdLines.push(marker);
-  mdLines.push("## \u{1F916} LLM Council Review");
-  mdLines.push("");
-  mdLines.push(modelsLine);
-  mdLines.push("");
-  mdLines.push(`Selected files: ${parts.length}${truncated ? ` (diff truncated to fit max_total_chars=${maxTotalChars})` : ""}`);
-  mdLines.push("");
-  mdLines.push("### Summary");
-  mdLines.push("");
-  mdLines.push(`Confirmed issues: **${confirmed.length}** \xB7 Uncertain: **${uncertain.length}**`);
-  mdLines.push("");
-  mdLines.push("### Confirmed issues");
-  mdLines.push("");
-  if (!confirmed.length) mdLines.push("- (none)");
-  for (const i of confirmed) {
-    mdLines.push(toMarkdownIssue(i, verifierMap.get(i.id)));
-  }
-  mdLines.push("");
-  mdLines.push("### Uncertain / needs human check");
-  mdLines.push("");
-  if (!uncertain.length) mdLines.push("- (none)");
-  for (const i of uncertain) {
-    mdLines.push(toMarkdownIssue(i, verifierMap.get(i.id)));
-  }
-  mdLines.push("");
-  const usageJson = JSON.stringify(usage, null, 2);
-  mdLines.push("<details>");
-  mdLines.push("<summary>Usage (tokens)</summary>");
-  mdLines.push("");
-  mdLines.push("```json");
-  mdLines.push(usageJson);
-  mdLines.push("```");
-  mdLines.push("</details>");
-  const reviewMarkdown = mdLines.join("\n");
   const comments = await octokit.request("GET /repos/{owner}/{repo}/issues/{issue_number}/comments", {
     owner,
     repo,
@@ -24213,7 +24427,7 @@ Issues to verify:
       owner,
       repo,
       comment_id: existing.id,
-      body: reviewMarkdown
+      body: markdown
     });
     info("Updated existing PR review comment.");
   } else {
@@ -24221,74 +24435,76 @@ Issues to verify:
       owner,
       repo,
       issue_number: prNumber,
-      body: reviewMarkdown
+      body: markdown
     });
     info("Posted PR review comment.");
   }
-  setOutput("review_markdown", reviewMarkdown);
-  setOutput("selected_files", String(parts.length));
-  setOutput("selected_filenames", JSON.stringify(selected.slice(0, parts.length).map((f) => f.filename)));
-  const meta = {
-    schemaVersion: 2,
-    provider,
-    repo: { owner, repo },
-    prNumber,
-    models: {
-      reviewers: models3,
-      judge: resolvedJudgeModel,
-      verifier: resolvedVerifierModel
-    },
-    budgets: { maxFiles, maxPatchChars, maxTotalChars },
-    minConfidence,
-    selectedFiles: selected.slice(0, parts.length).map((f) => ({
-      filename: f.filename,
-      additions: f.additions,
-      deletions: f.deletions,
-      status: f.status
-    })),
-    truncated,
-    usage,
-    createdAt: (/* @__PURE__ */ new Date()).toISOString()
-  };
-  if (writeFiles) {
-    const blobs = [];
-    for (let i = 0; i < reviewerResults.length; i++) {
-      const rr = reviewerResults[i];
-      blobs.push({
-        relPath: `reviewers/reviewer-${i + 1}-${rr.model}.txt`,
-        content: rr.rawText
-      });
-      if (rr.parsed) {
-        blobs.push({
-          relPath: `reviewers/reviewer-${i + 1}-${rr.model}.json`,
-          content: JSON.stringify(rr.parsed, null, 2)
+  if (addLabels) {
+    const labels = labelsForIssues(final.issues.confirmed);
+    if (labels.length) {
+      try {
+        await octokit.request("POST /repos/{owner}/{repo}/issues/{issue_number}/labels", {
+          owner,
+          repo,
+          issue_number: prNumber,
+          labels
         });
+        info(`Applied labels: ${labels.join(", ")}`);
+      } catch (e) {
+        warning(`Failed to apply labels: ${String(e?.message ?? e)}`);
       }
     }
-    blobs.push({ relPath: "judge.txt", content: judgeRes.text });
-    if (judgeParsed) blobs.push({ relPath: "judge.json", content: JSON.stringify(judgeParsed, null, 2) });
-    blobs.push({ relPath: "verifier.txt", content: verifierRes.text });
-    if (verifierParsed) blobs.push({ relPath: "verifier.json", content: JSON.stringify(verifierParsed, null, 2) });
+  }
+  if (addInline && headSha) {
+    const inline = issuesToInlineComments(final.issues.confirmed).slice(0, 10);
+    for (const c of inline) {
+      try {
+        await octokit.request("POST /repos/{owner}/{repo}/pulls/{pull_number}/comments", {
+          owner,
+          repo,
+          pull_number: prNumber,
+          commit_id: headSha,
+          path: c.path,
+          side: "RIGHT",
+          line: c.line,
+          body: c.body
+        });
+      } catch (e) {
+        warning(`Inline comment failed (${c.path}:${c.line}): ${String(e?.message ?? e)}`);
+      }
+    }
+  }
+  setOutput("review_markdown", markdown);
+  setOutput("selected_files", String(parts.length));
+  setOutput("selected_filenames", JSON.stringify(selected.slice(0, parts.length).map((f) => f.filename)));
+  await summary.addHeading("LLM Council Tool").addRaw(`Reviewed files: ${parts.length}
+
+Confirmed: ${final.summary.confirmedCount}
+Uncertain: ${final.summary.uncertainCount}
+`).write();
+  const meta = {
+    ...final,
+    repo: { owner, repo },
+    prNumber,
+    budgets: { maxFiles, maxPatchChars, maxTotalChars },
+    redactions: [...redactionKinds]
+  };
+  if (writeFiles) {
     await writeOutputs({
       outputDir,
-      reviewMarkdown,
+      reviewMarkdown: markdown,
       diffText,
       meta,
-      blobs
+      blobs: [
+        { relPath: "final.json", content: JSON.stringify(final, null, 2) },
+        { relPath: "usage.json", content: JSON.stringify(usage, null, 2) }
+      ]
     });
   }
-  await summary.addHeading("LLM Council Tool").addRaw(`Provider: ${provider}
-
-${modelsLine}
-
-Reviewed files: ${parts.length}
-`).addRaw(writeFiles ? `
-Wrote outputs to: ${outputDir}
-` : "").write();
 }
 (async () => {
   try {
-    await runWithRetries(run);
+    await runWithRetries(main);
   } catch (err) {
     setFailed(String(err?.stack ?? err?.message ?? err));
   }
