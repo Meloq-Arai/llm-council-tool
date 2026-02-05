@@ -381,21 +381,43 @@ async function main() {
     // Optional: inline PR review comments
     if (addInline && headSha) {
         const inline = issuesToInlineComments(final.issues.confirmed).slice(0, 10);
-        for (const c of inline) {
+        if (inline.length) {
+            // Prefer a single PR review with multiple inline comments (cleaner UX).
             try {
-                await octokit.request('POST /repos/{owner}/{repo}/pulls/{pull_number}/comments', {
+                await octokit.request('POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews', {
                     owner,
                     repo,
                     pull_number: prNumber,
                     commit_id: headSha,
-                    path: c.path,
-                    side: 'RIGHT',
-                    line: c.line,
-                    body: c.body,
+                    event: 'COMMENT',
+                    comments: inline.map((c) => ({
+                        path: c.path,
+                        side: c.side,
+                        line: c.line,
+                        body: c.body,
+                    })),
                 });
+                core.info(`Posted PR review with ${inline.length} inline comment(s).`);
             }
             catch (e) {
-                core.warning(`Inline comment failed (${c.path}:${c.line}): ${String(e?.message ?? e)}`);
+                core.warning(`Inline review post failed; falling back to individual comments: ${String(e?.message ?? e)}`);
+                for (const c of inline) {
+                    try {
+                        await octokit.request('POST /repos/{owner}/{repo}/pulls/{pull_number}/comments', {
+                            owner,
+                            repo,
+                            pull_number: prNumber,
+                            commit_id: headSha,
+                            path: c.path,
+                            side: c.side,
+                            line: c.line,
+                            body: c.body,
+                        });
+                    }
+                    catch (e2) {
+                        core.warning(`Inline comment failed (${c.path}:${c.side}:${c.line}): ${String(e2?.message ?? e2)}`);
+                    }
+                }
             }
         }
     }

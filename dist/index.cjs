@@ -23977,6 +23977,22 @@ function safeArray(x) {
   return Array.isArray(x) ? x : [];
 }
 function normalizeIssue(x, idx) {
+  const ev = String(x.evidence || "");
+  const rNums = [...ev.matchAll(/\bR(\d+)\b/g)].map((m) => Number(m[1]));
+  const lNums = [...ev.matchAll(/\bL(\d+)\b/g)].map((m) => Number(m[1]));
+  const inferLineRange = () => {
+    if (rNums.length) {
+      const min = Math.min(...rNums);
+      const max = Math.max(...rNums);
+      return { start: min, end: max, side: "RIGHT" };
+    }
+    if (lNums.length) {
+      const min = Math.min(...lNums);
+      const max = Math.max(...lNums);
+      return { start: min, end: max, side: "LEFT" };
+    }
+    return void 0;
+  };
   return {
     issue_id: String(x.issue_id || x.id || `I${idx + 1}`),
     title: String(x.title || "Untitled"),
@@ -23987,7 +24003,7 @@ function normalizeIssue(x, idx) {
       start: Number(x.line_range.start ?? x.line_range.from ?? 0) || 0,
       end: Number(x.line_range.end ?? x.line_range.to ?? x.line_range.start ?? 0) || 0,
       side: x.line_range.side === "LEFT" ? "LEFT" : "RIGHT"
-    } : void 0,
+    } : inferLineRange(),
     description: String(x.description || ""),
     why_this_matters: String(x.why_this_matters || x.why || "").trim() || // fallback: first sentence of description
     String(x.description || "").trim().split(/\n|\.|\!/)[0].trim(),
@@ -24225,6 +24241,7 @@ function issuesToInlineComments(issues) {
     out.push({
       path: i.file,
       line: lr.start,
+      side: lr.side === "LEFT" ? "LEFT" : "RIGHT",
       body: `**${i.title}** (_${i.severity}/${i.category}_, conf ${(i.confidence * 100).toFixed(0)}%)
 
 Evidence: ${i.evidence}
@@ -24580,20 +24597,40 @@ ${red.text || "[no patch provided by GitHub]"}
   }
   if (addInline && headSha) {
     const inline = issuesToInlineComments(final.issues.confirmed).slice(0, 10);
-    for (const c of inline) {
+    if (inline.length) {
       try {
-        await octokit.request("POST /repos/{owner}/{repo}/pulls/{pull_number}/comments", {
+        await octokit.request("POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews", {
           owner,
           repo,
           pull_number: prNumber,
           commit_id: headSha,
-          path: c.path,
-          side: "RIGHT",
-          line: c.line,
-          body: c.body
+          event: "COMMENT",
+          comments: inline.map((c) => ({
+            path: c.path,
+            side: c.side,
+            line: c.line,
+            body: c.body
+          }))
         });
+        info(`Posted PR review with ${inline.length} inline comment(s).`);
       } catch (e) {
-        warning(`Inline comment failed (${c.path}:${c.line}): ${String(e?.message ?? e)}`);
+        warning(`Inline review post failed; falling back to individual comments: ${String(e?.message ?? e)}`);
+        for (const c of inline) {
+          try {
+            await octokit.request("POST /repos/{owner}/{repo}/pulls/{pull_number}/comments", {
+              owner,
+              repo,
+              pull_number: prNumber,
+              commit_id: headSha,
+              path: c.path,
+              side: c.side,
+              line: c.line,
+              body: c.body
+            });
+          } catch (e2) {
+            warning(`Inline comment failed (${c.path}:${c.side}:${c.line}): ${String(e2?.message ?? e2)}`);
+          }
+        }
       }
     }
   }

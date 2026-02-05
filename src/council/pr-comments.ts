@@ -3,6 +3,7 @@ import type { FinalIssue } from './schema.js';
 export type InlineComment = {
   path: string;
   line: number;
+  side: 'RIGHT' | 'LEFT';
   body: string;
 };
 
@@ -19,6 +20,7 @@ export function issuesToInlineComments(issues: FinalIssue[]): InlineComment[] {
     out.push({
       path: i.file,
       line: lr.start,
+      side: lr.side === 'LEFT' ? 'LEFT' : 'RIGHT',
       body:
         `**${i.title}** (_${i.severity}/${i.category}_, conf ${(i.confidence * 100).toFixed(0)}%)\n\n` +
         `Evidence: ${i.evidence}\n\n` +

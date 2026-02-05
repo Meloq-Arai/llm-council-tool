@@ -13,6 +13,24 @@ function safeArray(x) {
     return Array.isArray(x) ? x : [];
 }
 function normalizeIssue(x, idx) {
+    // If the model didn't provide line_range but quoted annotated evidence like "L12 R34",
+    // infer a conservative single-line range.
+    const ev = String(x.evidence || '');
+    const rNums = [...ev.matchAll(/\bR(\d+)\b/g)].map((m) => Number(m[1]));
+    const lNums = [...ev.matchAll(/\bL(\d+)\b/g)].map((m) => Number(m[1]));
+    const inferLineRange = () => {
+        if (rNums.length) {
+            const min = Math.min(...rNums);
+            const max = Math.max(...rNums);
+            return { start: min, end: max, side: 'RIGHT' };
+        }
+        if (lNums.length) {
+            const min = Math.min(...lNums);
+            const max = Math.max(...lNums);
+            return { start: min, end: max, side: 'LEFT' };
+        }
+        return undefined;
+    };
     return {
         issue_id: String(x.issue_id || x.id || `I${idx + 1}`),
         title: String(x.title || 'Untitled'),
@@ -27,7 +45,7 @@ function normalizeIssue(x, idx) {
                 end: Number(x.line_range.end ?? x.line_range.to ?? x.line_range.start ?? 0) || 0,
                 side: x.line_range.side === 'LEFT' ? 'LEFT' : 'RIGHT',
             }
-            : undefined,
+            : inferLineRange(),
         description: String(x.description || ''),
         why_this_matters: String(x.why_this_matters || x.why || '').trim() ||
             // fallback: first sentence of description

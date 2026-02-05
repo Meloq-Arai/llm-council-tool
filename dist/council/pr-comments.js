@@ -11,6 +11,7 @@ export function issuesToInlineComments(issues) {
         out.push({
             path: i.file,
             line: lr.start,
+            side: lr.side === 'LEFT' ? 'LEFT' : 'RIGHT',
             body: `**${i.title}** (_${i.severity}/${i.category}_, conf ${(i.confidence * 100).toFixed(0)}%)\n\n` +
                 `Evidence: ${i.evidence}\n\n` +
                 `Suggestion: ${i.suggestion}`,
