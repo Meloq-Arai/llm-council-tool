@@ -3,6 +3,7 @@ import * as github from '@actions/github';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { callLLM } from './lib/llm.js';
+import { listGithubModels } from './lib/github-models.js';
 import { extractFirstJsonObject } from './council/json.js';
 function shouldReviewFile(f) {
     const lower = f.filename.toLowerCase();
@@ -112,8 +113,8 @@ async function run() {
     const provider = (core.getInput('llm_provider') || 'github-models');
     const openaiApiKey = core.getInput('openai_api_key') || process.env.OPENAI_API_KEY;
     const reviewModels = parseCsvList(core.getInput('review_models'));
-    const judgeModel = core.getInput('judge_model') || 'gpt-4o';
-    const verifierModel = core.getInput('verifier_model') || 'gpt-4o-mini';
+    let judgeModel = core.getInput('judge_model') || 'gpt-4o';
+    let verifierModel = core.getInput('verifier_model') || 'gpt-4o-mini';
     const maxFiles = Number(core.getInput('max_files') || '25');
     const maxPatchChars = Number(core.getInput('max_patch_chars') || '6000');
     const maxTotalChars = Number(core.getInput('max_total_chars') || '120000');
@@ -179,6 +180,55 @@ async function run() {
         githubToken: ghToken,
         openaiApiKey,
     };
+    // Resolve GitHub Models names (available models differ by account/entitlement; names can be case-sensitive).
+    let resolvedReviewModels = reviewModels;
+    let resolvedJudgeModel = judgeModel;
+    let resolvedVerifierModel = verifierModel;
+    if (provider === 'github-models') {
+        const available = await listGithubModels(ghToken);
+        const nameMap = new Map();
+        for (const m of available) {
+            const n = String(m.name || '').trim();
+            if (!n)
+                continue;
+            nameMap.set(n.toLowerCase(), n);
+        }
+        const canonicalize = (name) => {
+            const key = String(name || '').trim().toLowerCase();
+            return key ? (nameMap.get(key) ?? null) : null;
+        };
+        const fallbackPool = [
+            'gpt-4o',
+            'Meta-Llama-3.1-405B-Instruct',
+            'Meta-Llama-3.1-70B-Instruct',
+            'Meta-Llama-3-70B-Instruct',
+            'AI21-Jamba-Instruct',
+            'Mistral-large-2407',
+            'gpt-4o-mini',
+        ];
+        const pick = (requested, count) => {
+            const out = [];
+            const seen = new Set();
+            const add = (n) => {
+                if (!n)
+                    return;
+                const k = n.toLowerCase();
+                if (seen.has(k))
+                    return;
+                seen.add(k);
+                out.push(n);
+            };
+            for (const r of requested)
+                add(canonicalize(r));
+            for (const f of fallbackPool)
+                add(canonicalize(f));
+            return out.slice(0, count);
+        };
+        resolvedReviewModels = pick(reviewModels, 3);
+        resolvedJudgeModel = canonicalize(judgeModel) ?? pick([judgeModel], 1)[0] ?? 'gpt-4o';
+        resolvedVerifierModel = canonicalize(verifierModel) ?? pick([verifierModel], 1)[0] ?? 'gpt-4o-mini';
+        core.info(`Resolved GitHub Models: reviewers=[${resolvedReviewModels.join(', ')}], judge=${resolvedJudgeModel}, verifier=${resolvedVerifierModel}`);
+    }
     const usage = {};
     async function call(model, messages, label) {
         const r = await callLLM({
@@ -214,7 +264,9 @@ async function run() {
         `}`;
     const reviewerUser = `Review the following PR diffs. Quote evidence from the PATCH when possible.\n\n${diffText}`;
     const reviewerResults = [];
-    const models3 = reviewModels.length ? reviewModels.slice(0, 3) : ['gpt-4o', 'Meta-Llama-3.1-405B-Instruct', 'Mistral-large-2407'];
+    const models3 = resolvedReviewModels.length
+        ? resolvedReviewModels.slice(0, 3)
+        : ['gpt-4o', 'Meta-Llama-3.1-405B-Instruct', 'gpt-4o-mini'];
     for (let i = 0; i < models3.length; i++) {
         const model = models3[i];
         const r = await call(model, [
@@ -253,10 +305,10 @@ async function run() {
             return `REVIEWER_${idx + 1} (${rr.model}):\n${payload}`;
         })
             .join('\n\n');
-    const judgeRes = await call(judgeModel, [
+    const judgeRes = await call(resolvedJudgeModel, [
         { role: 'system', content: judgeSystem },
         { role: 'user', content: judgeUser },
-    ], `judge_${judgeModel}`);
+    ], `judge_${resolvedJudgeModel}`);
     const judgeParsed = extractFirstJsonObject(judgeRes.text);
     const judgeIssues = Array.isArray(judgeParsed?.issues)
         ? judgeParsed.issues
@@ -297,10 +349,10 @@ async function run() {
             evidence: i.evidence,
             suggestion: i.suggestion,
         })), null, 2);
-    const verifierRes = await call(verifierModel, [
+    const verifierRes = await call(resolvedVerifierModel, [
         { role: 'system', content: verifierSystem },
         { role: 'user', content: verifierUser },
-    ], `verifier_${verifierModel}`);
+    ], `verifier_${resolvedVerifierModel}`);
     const verifierParsed = extractFirstJsonObject(verifierRes.text);
     const verifierMap = new Map();
     if (Array.isArray(verifierParsed?.results)) {
@@ -326,7 +378,7 @@ async function run() {
         (ok ? confirmed : uncertain).push(i);
     }
     const marker = '<!-- llm-council-tool -->';
-    const modelsLine = `Reviewers: ${models3.join(', ')} · Judge: ${judgeModel} · Verifier: ${verifierModel}`;
+    const modelsLine = `Reviewers: ${models3.join(', ')} · Judge: ${resolvedJudgeModel} · Verifier: ${resolvedVerifierModel}`;
     const mdLines = [];
     mdLines.push(marker);
     mdLines.push('## 🤖 LLM Council Review');
@@ -400,8 +452,8 @@ async function run() {
         prNumber,
         models: {
             reviewers: models3,
-            judge: judgeModel,
-            verifier: verifierModel,
+            judge: resolvedJudgeModel,
+            verifier: resolvedVerifierModel,
         },
         budgets: { maxFiles, maxPatchChars, maxTotalChars },
         minConfidence,

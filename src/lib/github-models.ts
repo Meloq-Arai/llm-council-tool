@@ -55,6 +55,23 @@ function extractUsage(data: any): GithubModelsUsage | undefined {
   return undefined;
 }
 
+export async function listGithubModels(token: string): Promise<Array<{ name: string }>> {
+  const resp = await fetch('https://models.inference.ai.azure.com/models', {
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '');
+    throw new Error(`GitHub Models list error: ${resp.status} ${resp.statusText}${text ? `\n${text}` : ''}`);
+  }
+  const data: any = await resp.json();
+  if (!Array.isArray(data)) return [];
+  return data
+    .map((m: any) => ({ name: String(m?.name ?? m?.id ?? '') }))
+    .filter((m: any) => m.name && m.name !== '[object Object]');
+}
+
 export async function callGithubModels(
   {
     token,
