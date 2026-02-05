@@ -180,9 +180,36 @@ async function main() {
   const addLabels = parseBool(core.getInput('add_labels'), true);
   const addInline = parseBool(core.getInput('add_inline_comments'), false);
 
+  const marker = '<!-- llm-council-tool -->';
+
+  const writeSkip = async (reason: string) => {
+    const emptyFinal: FinalOutput = {
+      schemaVersion: 3 as const,
+      summary: { confirmedCount: 0, uncertainCount: 0, truncatedDiff: false },
+      issues: { confirmed: [], uncertain: [] },
+      models: { reviewers: [], judge: 'skipped', verifier: 'skipped' },
+    };
+
+    const md = `${marker}\n\n## LLM Council Tool\n\nSkipped: ${reason}\n`;
+
+    core.setOutput('review_markdown', md);
+    core.setOutput('selected_files', '0');
+    core.setOutput('selected_filenames', '[]');
+
+    if (writeFiles) {
+      await writeOutputs({
+        outputDir,
+        reviewMarkdown: md,
+        diffText: '',
+        meta: { ...emptyFinal, skipped: true, reason },
+        blobs: [{ relPath: 'final.json', content: JSON.stringify(emptyFinal, null, 2) }],
+      });
+    }
+  };
+
   const ctx = github.context;
   if (ctx.eventName !== 'pull_request' && ctx.eventName !== 'pull_request_target') {
-    core.info(`Skipping: event ${ctx.eventName} not supported.`);
+    await writeSkip(`event ${ctx.eventName} not supported`);
     return;
   }
 
@@ -216,6 +243,7 @@ async function main() {
   const selected = files.filter(shouldReviewFile).slice(0, maxFiles);
   if (!selected.length) {
     core.info('No files selected for review.');
+    await writeSkip('no files selected for review (filters/trivial changes)');
     return;
   }
 
@@ -302,7 +330,6 @@ async function main() {
   });
 
   // Post / update PR comment
-  const marker = '<!-- llm-council-tool -->';
   const comments = await octokit.request('GET /repos/{owner}/{repo}/issues/{issue_number}/comments', {
     owner,
     repo,
