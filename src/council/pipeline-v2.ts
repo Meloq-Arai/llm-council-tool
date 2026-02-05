@@ -89,18 +89,51 @@ function normalizeIssue(x: any, idx: number): FinalIssue {
   };
 }
 
+const isUnknownModel = (e: any) =>
+  /unknown_model/i.test(String(e?.message ?? e ?? '')) ||
+  /"code"\s*:\s*"unknown_model"/i.test(String(e?.message ?? ''));
+
+const isTokenLimit = (e: any) =>
+  /tokens_limit_reached/i.test(String(e?.message ?? e ?? '')) ||
+  /413\b/i.test(String(e?.message ?? e ?? '')) ||
+  /payload too large/i.test(String(e?.message ?? e ?? '')) ||
+  /max size\s*:\s*\d+\s*tokens/i.test(String(e?.message ?? e ?? ''));
+
 async function callStage(cfg: CouncilConfig, label: string, spec: ModelSpec, messages: any[]): Promise<LLMResult> {
-  const r = await callLLM({
-    provider: spec.provider,
-    model: spec.model,
-    messages,
-    githubToken: cfg.githubToken,
-    openaiApiKey: cfg.openaiApiKey,
-    googleApiKey: cfg.googleApiKey,
-    timeoutMs: 240_000,
-    maxRetries: 3,
-  });
-  return r;
+  try {
+    const r = await callLLM({
+      provider: spec.provider,
+      model: spec.model,
+      messages,
+      githubToken: cfg.githubToken,
+      openaiApiKey: cfg.openaiApiKey,
+      googleApiKey: cfg.googleApiKey,
+      timeoutMs: 240_000,
+      maxRetries: 3,
+    });
+    return r;
+  } catch (e: any) {
+    // GitHub Models is flaky: catalog can list models that reject inference (unknown_model)
+    // and high-tier models often trip token limits. For judge/verifier stages, fail over.
+    if (spec.provider === 'github-models' && (isUnknownModel(e) || isTokenLimit(e))) {
+      const fallbackModel = label.startsWith('verifier') ? 'gpt-4o-mini' : 'gpt-4o';
+      if (spec.model !== fallbackModel) {
+        core.warning(`Stage ${label} failed (${spec.model}); retrying with ${fallbackModel}: ${String(e?.message ?? e)}`);
+        const r2 = await callLLM({
+          provider: spec.provider,
+          model: fallbackModel,
+          messages,
+          githubToken: cfg.githubToken,
+          openaiApiKey: cfg.openaiApiKey,
+          googleApiKey: cfg.googleApiKey,
+          timeoutMs: 240_000,
+          maxRetries: 2,
+        });
+        return r2;
+      }
+    }
+    throw e;
+  }
 }
 
 export async function runCouncil(cfg: CouncilConfig): Promise<{ final: FinalOutput; markdown: string; usage: any }> {
@@ -132,9 +165,6 @@ export async function runCouncil(cfg: CouncilConfig): Promise<{ final: FinalOutp
   const reviewerOutputs: Array<{ model: string; text: string; json: any | null }> = [];
 
   const usedReviewers: ModelSpec[] = [];
-  const isUnknownModel = (e: any) =>
-    /unknown_model/i.test(String(e?.message ?? e ?? '')) ||
-    /"code"\s*:\s*"unknown_model"/i.test(String(e?.message ?? ''));
 
   for (let i = 0; i < cfg.reviewers.length; i++) {
     if (usedReviewers.length >= 3) break;

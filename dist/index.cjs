@@ -24015,18 +24015,41 @@ function normalizeIssue(x, idx) {
     tags: safeArray(x.tags).map((t) => String(t)).slice(0, 20)
   };
 }
+var isUnknownModel = (e) => /unknown_model/i.test(String(e?.message ?? e ?? "")) || /"code"\s*:\s*"unknown_model"/i.test(String(e?.message ?? ""));
+var isTokenLimit = (e) => /tokens_limit_reached/i.test(String(e?.message ?? e ?? "")) || /413\b/i.test(String(e?.message ?? e ?? "")) || /payload too large/i.test(String(e?.message ?? e ?? "")) || /max size\s*:\s*\d+\s*tokens/i.test(String(e?.message ?? e ?? ""));
 async function callStage(cfg, label, spec, messages) {
-  const r = await callLLM({
-    provider: spec.provider,
-    model: spec.model,
-    messages,
-    githubToken: cfg.githubToken,
-    openaiApiKey: cfg.openaiApiKey,
-    googleApiKey: cfg.googleApiKey,
-    timeoutMs: 24e4,
-    maxRetries: 3
-  });
-  return r;
+  try {
+    const r = await callLLM({
+      provider: spec.provider,
+      model: spec.model,
+      messages,
+      githubToken: cfg.githubToken,
+      openaiApiKey: cfg.openaiApiKey,
+      googleApiKey: cfg.googleApiKey,
+      timeoutMs: 24e4,
+      maxRetries: 3
+    });
+    return r;
+  } catch (e) {
+    if (spec.provider === "github-models" && (isUnknownModel(e) || isTokenLimit(e))) {
+      const fallbackModel = label.startsWith("verifier") ? "gpt-4o-mini" : "gpt-4o";
+      if (spec.model !== fallbackModel) {
+        warning(`Stage ${label} failed (${spec.model}); retrying with ${fallbackModel}: ${String(e?.message ?? e)}`);
+        const r2 = await callLLM({
+          provider: spec.provider,
+          model: fallbackModel,
+          messages,
+          githubToken: cfg.githubToken,
+          openaiApiKey: cfg.openaiApiKey,
+          googleApiKey: cfg.googleApiKey,
+          timeoutMs: 24e4,
+          maxRetries: 2
+        });
+        return r2;
+      }
+    }
+    throw e;
+  }
 }
 async function runCouncil(cfg) {
   const usage = {};
@@ -24055,7 +24078,6 @@ Schema: {"schemaVersion":1,"issues":[{"issue_id":string,"title":string,"severity
 ${stageDiffFor(spec)}`;
   const reviewerOutputs = [];
   const usedReviewers = [];
-  const isUnknownModel = (e) => /unknown_model/i.test(String(e?.message ?? e ?? "")) || /"code"\s*:\s*"unknown_model"/i.test(String(e?.message ?? ""));
   for (let i = 0; i < cfg.reviewers.length; i++) {
     if (usedReviewers.length >= 3) break;
     const spec = cfg.reviewers[i];
