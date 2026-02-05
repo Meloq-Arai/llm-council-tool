@@ -1,6 +1,7 @@
 name: LLM Council Tool (MVP)
 
 on:
+  workflow_dispatch:
   pull_request:
     types: [opened, synchronize, reopened]
 
