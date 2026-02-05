@@ -23587,6 +23587,195 @@ ${text2}` : ""}`);
   throw lastErr ?? new Error("OpenAI request failed");
 }
 
+// src/lib/github-models.ts
+function sleep2(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+function parseRetryAfterMs2(h) {
+  if (!h) return void 0;
+  const s = Number(h);
+  if (Number.isFinite(s) && s > 0) return Math.round(s * 1e3);
+  return void 0;
+}
+function isRetryableStatus2(status) {
+  return status === 429 || status >= 500 && status <= 599;
+}
+function extractText(data) {
+  const t = data?.choices?.[0]?.message?.content;
+  if (typeof t === "string" && t.trim()) return t;
+  return "";
+}
+function extractUsage2(data) {
+  const u = data?.usage;
+  if (!u) return void 0;
+  const inputTokens = Number.isFinite(u.prompt_tokens) ? Number(u.prompt_tokens) : void 0;
+  const outputTokens = Number.isFinite(u.completion_tokens) ? Number(u.completion_tokens) : void 0;
+  const totalTokens = Number.isFinite(u.total_tokens) ? Number(u.total_tokens) : void 0;
+  if (inputTokens || outputTokens || totalTokens) return { inputTokens, outputTokens, totalTokens };
+  return void 0;
+}
+async function callGithubModels({
+  token,
+  model,
+  messages,
+  timeoutMs = 12e4,
+  maxRetries = 3,
+  retryBaseDelayMs = 1e3,
+  temperature,
+  maxTokens
+}) {
+  let lastErr;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), timeoutMs);
+    try {
+      const resp = await fetch("https://models.inference.ai.azure.com/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          model,
+          messages,
+          ...typeof temperature === "number" ? { temperature } : {},
+          ...typeof maxTokens === "number" ? { max_tokens: maxTokens } : {}
+        }),
+        signal: ac.signal
+      });
+      if (!resp.ok) {
+        const text2 = await resp.text().catch(() => "");
+        const err = new Error(
+          `GitHub Models API error: ${resp.status} ${resp.statusText}${text2 ? `
+${text2}` : ""}`
+        );
+        if (attempt < maxRetries && isRetryableStatus2(resp.status)) {
+          const retryAfterMs = parseRetryAfterMs2(resp.headers.get("retry-after"));
+          const backoff = retryAfterMs ?? Math.round(retryBaseDelayMs * Math.pow(2, attempt) * (0.9 + Math.random() * 0.2));
+          await sleep2(backoff);
+          continue;
+        }
+        throw err;
+      }
+      const data = await resp.json();
+      const text = extractText(data);
+      return {
+        text: text || JSON.stringify(data, null, 2),
+        usage: extractUsage2(data),
+        raw: data
+      };
+    } catch (e) {
+      lastErr = e;
+      const isAbort = e?.name === "AbortError";
+      if (attempt < maxRetries) {
+        const backoff = Math.round(retryBaseDelayMs * Math.pow(2, attempt) * (0.9 + Math.random() * 0.2));
+        await sleep2(backoff);
+        continue;
+      }
+      throw isAbort ? new Error(`GitHub Models request timed out after ${timeoutMs}ms`) : e;
+    } finally {
+      clearTimeout(t);
+    }
+  }
+  throw lastErr ?? new Error("GitHub Models request failed");
+}
+
+// src/lib/llm.ts
+async function callLLM(req) {
+  const timeoutMs = req.timeoutMs;
+  const maxRetries = req.maxRetries;
+  const retryBaseDelayMs = req.retryBaseDelayMs;
+  if (req.provider === "openai") {
+    if (!req.openaiApiKey) throw new Error("openaiApiKey is required for provider=openai");
+    const prompt = req.prompt ?? (req.messages ? req.messages.map((m) => `${m.role.toUpperCase()}:
+${m.content}`).join("\n\n") : void 0);
+    if (!prompt) throw new Error("Either prompt or messages is required for provider=openai");
+    const r = await callOpenAI({
+      apiKey: req.openaiApiKey,
+      model: req.model,
+      prompt,
+      timeoutMs,
+      maxRetries,
+      retryBaseDelayMs
+    });
+    return r;
+  }
+  if (req.provider === "github-models") {
+    if (!req.githubToken) throw new Error("githubToken is required for provider=github-models");
+    const messages = req.messages ?? (req.prompt ? [
+      {
+        role: "user",
+        content: req.prompt
+      }
+    ] : void 0);
+    if (!messages) throw new Error("Either messages or prompt is required for provider=github-models");
+    const r = await callGithubModels({
+      token: req.githubToken,
+      model: req.model,
+      messages,
+      timeoutMs,
+      maxRetries,
+      retryBaseDelayMs,
+      temperature: req.temperature,
+      maxTokens: req.maxTokens
+    });
+    return r;
+  }
+  throw new Error(`Unknown provider: ${req.provider}`);
+}
+
+// src/council/json.ts
+function stripCodeFence(text) {
+  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  return (fence?.[1] ?? text).trim();
+}
+function findJsonSlice(text) {
+  const s = stripCodeFence(text);
+  let start = s.indexOf("{");
+  while (start !== -1) {
+    let depth = 0;
+    let inStr = false;
+    let esc = false;
+    for (let i = start; i < s.length; i++) {
+      const ch = s[i];
+      if (inStr) {
+        if (esc) {
+          esc = false;
+          continue;
+        }
+        if (ch === "\\") {
+          esc = true;
+          continue;
+        }
+        if (ch === '"') {
+          inStr = false;
+        }
+        continue;
+      }
+      if (ch === '"') {
+        inStr = true;
+        continue;
+      }
+      if (ch === "{") depth++;
+      if (ch === "}") depth--;
+      if (depth === 0) {
+        return s.slice(start, i + 1);
+      }
+    }
+    start = s.indexOf("{", start + 1);
+  }
+  return null;
+}
+function extractFirstJsonObject(text) {
+  const slice = findJsonSlice(text);
+  if (!slice) return null;
+  try {
+    return JSON.parse(slice);
+  } catch {
+    return null;
+  }
+}
+
 // src/index.ts
 function shouldReviewFile(f) {
   const lower = f.filename.toLowerCase();
@@ -23601,40 +23790,83 @@ function shouldReviewFile(f) {
   if (f.additions + f.deletions < 10) return false;
   return true;
 }
-function sleep2(ms) {
+function parseCsvList(s) {
+  return (s || "").split(",").map((x) => x.trim()).filter(Boolean);
+}
+function sleep3(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 function isTransientError(err) {
   const msg = String(err?.message ?? err ?? "");
   return /\b(ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND)\b/i.test(msg) || /\b(429|500|502|503|504)\b/.test(msg) || /rate limit/i.test(msg) || /timeout/i.test(msg);
 }
+async function runWithRetries(fn) {
+  const maxAttempts = Number(process.env.LLM_COUNCIL_RETRIES ?? 3);
+  let lastErr = void 0;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await fn();
+      return;
+    } catch (err) {
+      lastErr = err;
+      if (!isTransientError(err) || attempt === maxAttempts) {
+        throw err;
+      }
+      const backoffMs = Math.min(3e4, 1e3 * Math.pow(2, attempt - 1));
+      warning(
+        `Transient error (attempt ${attempt}/${maxAttempts}). Retrying in ${backoffMs}ms: ${String(
+          err?.message ?? err
+        )}`
+      );
+      await sleep3(backoffMs);
+    }
+  }
+  throw lastErr;
+}
 async function writeOutputs(params) {
   const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
   const outDirAbs = import_node_path.default.isAbsolute(params.outputDir) ? params.outputDir : import_node_path.default.join(workspace, params.outputDir);
   await import_promises.default.mkdir(outDirAbs, { recursive: true });
   const reviewPath = import_node_path.default.join(outDirAbs, "review.md");
-  const promptPath = import_node_path.default.join(outDirAbs, "prompt.txt");
   const diffPath = import_node_path.default.join(outDirAbs, "diff.txt");
   const metaPath = import_node_path.default.join(outDirAbs, "meta.json");
   await Promise.all([
-    import_promises.default.writeFile(reviewPath, params.markerBody, "utf8"),
-    import_promises.default.writeFile(promptPath, params.prompt, "utf8"),
-    import_promises.default.writeFile(diffPath, params.patches, "utf8"),
+    import_promises.default.writeFile(reviewPath, params.reviewMarkdown, "utf8"),
+    import_promises.default.writeFile(diffPath, params.diffText, "utf8"),
     import_promises.default.writeFile(metaPath, JSON.stringify(params.meta, null, 2), "utf8")
   ]);
+  for (const b of params.blobs) {
+    const pAbs = import_node_path.default.join(outDirAbs, b.relPath);
+    await import_promises.default.mkdir(import_node_path.default.dirname(pAbs), { recursive: true });
+    await import_promises.default.writeFile(pAbs, b.content, "utf8");
+  }
   setOutput("review_path", import_node_path.default.relative(workspace, reviewPath));
-  setOutput("prompt_path", import_node_path.default.relative(workspace, promptPath));
   setOutput("diff_path", import_node_path.default.relative(workspace, diffPath));
   setOutput("meta_path", import_node_path.default.relative(workspace, metaPath));
 }
-async function main() {
+function toMarkdownIssue(i, v) {
+  const conf = v ? ` (confidence ${(v.confidence * 100).toFixed(0)}%)` : "";
+  const header = `- **${i.title}** \u2014 _${i.severity}/${i.category}_${conf}`;
+  const lines = [header];
+  if (i.files?.length) lines.push(`  - Files: ${i.files.join(", ")}`);
+  if (i.description) lines.push(`  - ${i.description}`);
+  if (v?.evidence || i.evidence) lines.push(`  - Evidence: ${v?.evidence ?? i.evidence}`);
+  if (i.suggestion) lines.push(`  - Suggestion: ${i.suggestion}`);
+  if (v?.note) lines.push(`  - Note: ${v.note}`);
+  return lines.join("\n");
+}
+async function run() {
   const ghToken = getInput("github_token") || process.env.GITHUB_TOKEN;
   if (!ghToken) throw new Error("GitHub token is missing (github_token input / GITHUB_TOKEN env)");
-  const openaiApiKey = getInput("openai_api_key", { required: true });
-  const openaiModel = getInput("openai_model") || "gpt-4.1-mini";
+  const provider = getInput("llm_provider") || "github-models";
+  const openaiApiKey = getInput("openai_api_key") || process.env.OPENAI_API_KEY;
+  const reviewModels = parseCsvList(getInput("review_models"));
+  const judgeModel = getInput("judge_model") || "gpt-4o";
+  const verifierModel = getInput("verifier_model") || "gpt-4o-mini";
   const maxFiles = Number(getInput("max_files") || "25");
   const maxPatchChars = Number(getInput("max_patch_chars") || "6000");
   const maxTotalChars = Number(getInput("max_total_chars") || "120000");
+  const minConfidence = Number(getInput("min_confidence") || "0.55");
   const outputDir = getInput("output_dir") || ".llm-council-tool";
   const writeFiles = (getInput("write_files") || "true").toLowerCase() !== "false";
   const ctx = context2;
@@ -23686,35 +23918,213 @@ ${patch || "[no patch provided by GitHub]"}
     parts.push(block);
     total += block.length;
   }
-  const patches = parts.join("\n---\n");
-  const prompt = `You are a senior code reviewer. Review the following GitHub PR diffs.
+  const diffText = parts.join("\n---\n");
+  const llmAuth = {
+    provider,
+    githubToken: ghToken,
+    openaiApiKey
+  };
+  const usage = {};
+  async function call(model, messages, label) {
+    const r = await callLLM({
+      provider: llmAuth.provider,
+      model,
+      messages,
+      openaiApiKey: llmAuth.openaiApiKey,
+      githubToken: llmAuth.githubToken,
+      timeoutMs: 24e4,
+      maxRetries: 3
+    });
+    usage[label] = r.usage;
+    return r;
+  }
+  const reviewerSystem = `You are a top-tier senior software engineer doing PR review.
+Goal: find high-signal problems (correctness, security, edge cases, maintainability).
 
-Rules:
-- Be concise and specific.
-- Prefer high-signal issues: correctness, security, edge cases, maintainability.
-- If you suggest a change, show a short code snippet.
-- Output Markdown with sections: Summary, High-risk issues, Suggestions, Questions.
+Output JSON ONLY (no markdown, no code fences).
+Schema:
+{
+  "schemaVersion": 1,
+  "issues": [
+    {
+      "title": string,
+      "severity": "critical"|"high"|"medium"|"low",
+      "category": string,
+      "files": string[],
+      "description": string,
+      "evidence": string,
+      "suggestion": string
+    }
+  ]
+}`;
+  const reviewerUser = `Review the following PR diffs. Quote evidence from the PATCH when possible.
 
-Diffs:
+${diffText}`;
+  const reviewerResults = [];
+  const models3 = reviewModels.length ? reviewModels.slice(0, 3) : ["gpt-4o", "Meta-Llama-3.1-405B-Instruct", "Mistral-large-2407"];
+  for (let i = 0; i < models3.length; i++) {
+    const model = models3[i];
+    const r = await call(
+      model,
+      [
+        { role: "system", content: reviewerSystem },
+        { role: "user", content: reviewerUser }
+      ],
+      `reviewer_${i + 1}_${model}`
+    );
+    const parsed = extractFirstJsonObject(r.text);
+    reviewerResults.push({ model, rawText: r.text, parsed, usage: r.usage });
+  }
+  const judgeSystem = `You are the judge model. You receive 3 reviewer JSON outputs and the raw diff.
+Task: deduplicate, remove repetition, fix obvious mistakes, and output a single consolidated list of issues.
+Prefer fewer, higher-signal issues with strong evidence.
 
-${patches}`;
-  const { text: outputText, usage } = await callOpenAI({
-    apiKey: openaiApiKey,
-    model: openaiModel,
-    prompt,
-    timeoutMs: 24e4,
-    maxRetries: 3
-  });
+Output JSON ONLY (no markdown, no code fences).
+Schema:
+{
+  "schemaVersion": 1,
+  "issues": [
+    {
+      "id": string,
+      "title": string,
+      "severity": "critical"|"high"|"medium"|"low",
+      "category": string,
+      "files": string[],
+      "description": string,
+      "evidence": string,
+      "suggestion": string
+    }
+  ]
+}`;
+  const judgeUser = `Diff:
+
+${diffText}
+
+Reviewer outputs (may be imperfect):
+
+` + reviewerResults.map((rr, idx) => {
+    const payload = rr.parsed ? JSON.stringify(rr.parsed) : rr.rawText;
+    return `REVIEWER_${idx + 1} (${rr.model}):
+${payload}`;
+  }).join("\n\n");
+  const judgeRes = await call(
+    judgeModel,
+    [
+      { role: "system", content: judgeSystem },
+      { role: "user", content: judgeUser }
+    ],
+    `judge_${judgeModel}`
+  );
+  const judgeParsed = extractFirstJsonObject(judgeRes.text);
+  const judgeIssues = Array.isArray(judgeParsed?.issues) ? judgeParsed.issues.map((x, idx) => ({
+    id: String(x.id || `I${idx + 1}`),
+    title: String(x.title || "Untitled"),
+    severity: ["critical", "high", "medium", "low"].includes(String(x.severity)) ? String(x.severity) : "medium",
+    category: String(x.category || "general"),
+    files: Array.isArray(x.files) ? x.files.map((f) => String(f)) : [],
+    description: String(x.description || ""),
+    evidence: typeof x.evidence === "string" ? x.evidence : void 0,
+    suggestion: typeof x.suggestion === "string" ? x.suggestion : void 0
+  })).slice(0, 30) : [];
+  const verifierSystem = `You are a strict confidence checker. You must verify each proposed issue against the diff.
+If the diff does NOT support an issue, mark it unconfirmed with low confidence.
+
+Output JSON ONLY (no markdown, no code fences).
+Schema:
+{
+  "schemaVersion": 1,
+  "results": [
+    { "id": string, "confirmed": boolean, "confidence": number, "note": string, "evidence": string }
+  ]
+}`;
+  const verifierUser = `Diff:
+
+${diffText}
+
+Issues to verify:
+
+` + JSON.stringify(
+    judgeIssues.map((i) => ({
+      id: i.id,
+      title: i.title,
+      severity: i.severity,
+      category: i.category,
+      files: i.files,
+      description: i.description,
+      evidence: i.evidence,
+      suggestion: i.suggestion
+    })),
+    null,
+    2
+  );
+  const verifierRes = await call(
+    verifierModel,
+    [
+      { role: "system", content: verifierSystem },
+      { role: "user", content: verifierUser }
+    ],
+    `verifier_${verifierModel}`
+  );
+  const verifierParsed = extractFirstJsonObject(verifierRes.text);
+  const verifierMap = /* @__PURE__ */ new Map();
+  if (Array.isArray(verifierParsed?.results)) {
+    for (const r of verifierParsed.results) {
+      const id = String(r.id ?? "").trim();
+      if (!id) continue;
+      const confidence = Math.max(0, Math.min(1, Number(r.confidence ?? 0)));
+      verifierMap.set(id, {
+        confirmed: Boolean(r.confirmed),
+        confidence,
+        note: typeof r.note === "string" ? r.note : void 0,
+        evidence: typeof r.evidence === "string" ? r.evidence : void 0
+      });
+    }
+  }
+  const confirmed = [];
+  const uncertain = [];
+  for (const i of judgeIssues) {
+    const v = verifierMap.get(i.id);
+    const c = v?.confidence ?? 0;
+    const ok = Boolean(v?.confirmed) && c >= minConfidence;
+    (ok ? confirmed : uncertain).push(i);
+  }
   const marker = "<!-- llm-council-tool -->";
-  const usageLine = usage?.totalTokens ? `Tokens: input ${usage.inputTokens ?? "?"} \xB7 output ${usage.outputTokens ?? "?"} \xB7 total ${usage.totalTokens}` : void 0;
-  const body = `${marker}
-## \u{1F916} LLM Review (MVP)
-
-Model: \`${openaiModel}\`
-
-${usageLine ? usageLine + "\n\n" : ""}` + (truncated ? `> Note: diff truncated to fit budget (max_total_chars=${maxTotalChars}).
-
-` : "") + outputText;
+  const modelsLine = `Reviewers: ${models3.join(", ")} \xB7 Judge: ${judgeModel} \xB7 Verifier: ${verifierModel}`;
+  const mdLines = [];
+  mdLines.push(marker);
+  mdLines.push("## \u{1F916} LLM Council Review");
+  mdLines.push("");
+  mdLines.push(modelsLine);
+  mdLines.push("");
+  mdLines.push(`Selected files: ${parts.length}${truncated ? ` (diff truncated to fit max_total_chars=${maxTotalChars})` : ""}`);
+  mdLines.push("");
+  mdLines.push("### Summary");
+  mdLines.push("");
+  mdLines.push(`Confirmed issues: **${confirmed.length}** \xB7 Uncertain: **${uncertain.length}**`);
+  mdLines.push("");
+  mdLines.push("### Confirmed issues");
+  mdLines.push("");
+  if (!confirmed.length) mdLines.push("- (none)");
+  for (const i of confirmed) {
+    mdLines.push(toMarkdownIssue(i, verifierMap.get(i.id)));
+  }
+  mdLines.push("");
+  mdLines.push("### Uncertain / needs human check");
+  mdLines.push("");
+  if (!uncertain.length) mdLines.push("- (none)");
+  for (const i of uncertain) {
+    mdLines.push(toMarkdownIssue(i, verifierMap.get(i.id)));
+  }
+  mdLines.push("");
+  const usageJson = JSON.stringify(usage, null, 2);
+  mdLines.push("<details>");
+  mdLines.push("<summary>Usage (tokens)</summary>");
+  mdLines.push("");
+  mdLines.push("```json");
+  mdLines.push(usageJson);
+  mdLines.push("```");
+  mdLines.push("</details>");
+  const reviewMarkdown = mdLines.join("\n");
   const comments = await octokit.request("GET /repos/{owner}/{repo}/issues/{issue_number}/comments", {
     owner,
     repo,
@@ -23727,7 +24137,7 @@ ${usageLine ? usageLine + "\n\n" : ""}` + (truncated ? `> Note: diff truncated t
       owner,
       repo,
       comment_id: existing.id,
-      body
+      body: reviewMarkdown
     });
     info("Updated existing PR review comment.");
   } else {
@@ -23735,20 +24145,25 @@ ${usageLine ? usageLine + "\n\n" : ""}` + (truncated ? `> Note: diff truncated t
       owner,
       repo,
       issue_number: prNumber,
-      body
+      body: reviewMarkdown
     });
     info("Posted PR review comment.");
   }
-  setOutput("review_markdown", body);
+  setOutput("review_markdown", reviewMarkdown);
   setOutput("selected_files", String(parts.length));
   setOutput("selected_filenames", JSON.stringify(selected.slice(0, parts.length).map((f) => f.filename)));
   const meta = {
-    schemaVersion: 1,
+    schemaVersion: 2,
+    provider,
     repo: { owner, repo },
     prNumber,
-    model: openaiModel,
-    usage,
+    models: {
+      reviewers: models3,
+      judge: judgeModel,
+      verifier: verifierModel
+    },
     budgets: { maxFiles, maxPatchChars, maxTotalChars },
+    minConfidence,
     selectedFiles: selected.slice(0, parts.length).map((f) => ({
       filename: f.filename,
       additions: f.additions,
@@ -23756,44 +24171,48 @@ ${usageLine ? usageLine + "\n\n" : ""}` + (truncated ? `> Note: diff truncated t
       status: f.status
     })),
     truncated,
+    usage,
     createdAt: (/* @__PURE__ */ new Date()).toISOString()
   };
   if (writeFiles) {
-    await writeOutputs({ outputDir, markerBody: body, prompt, patches, meta });
+    const blobs = [];
+    for (let i = 0; i < reviewerResults.length; i++) {
+      const rr = reviewerResults[i];
+      blobs.push({
+        relPath: `reviewers/reviewer-${i + 1}-${rr.model}.txt`,
+        content: rr.rawText
+      });
+      if (rr.parsed) {
+        blobs.push({
+          relPath: `reviewers/reviewer-${i + 1}-${rr.model}.json`,
+          content: JSON.stringify(rr.parsed, null, 2)
+        });
+      }
+    }
+    blobs.push({ relPath: "judge.txt", content: judgeRes.text });
+    if (judgeParsed) blobs.push({ relPath: "judge.json", content: JSON.stringify(judgeParsed, null, 2) });
+    blobs.push({ relPath: "verifier.txt", content: verifierRes.text });
+    if (verifierParsed) blobs.push({ relPath: "verifier.json", content: JSON.stringify(verifierParsed, null, 2) });
+    await writeOutputs({
+      outputDir,
+      reviewMarkdown,
+      diffText,
+      meta,
+      blobs
+    });
   }
-  await summary.addHeading("LLM Council Tool").addRaw(`Reviewed files: ${parts.length}
+  await summary.addHeading("LLM Council Tool").addRaw(`Provider: ${provider}
 
-Model: ${openaiModel}
+${modelsLine}
+
+Reviewed files: ${parts.length}
 `).addRaw(writeFiles ? `
 Wrote outputs to: ${outputDir}
 ` : "").write();
 }
-async function runWithRetries() {
-  const maxAttempts = Number(process.env.LLM_COUNCIL_RETRIES ?? 3);
-  let lastErr = void 0;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      await main();
-      return;
-    } catch (err) {
-      lastErr = err;
-      if (!isTransientError(err) || attempt === maxAttempts) {
-        throw err;
-      }
-      const backoffMs = Math.min(3e4, 1e3 * Math.pow(2, attempt - 1));
-      warning(
-        `Transient error (attempt ${attempt}/${maxAttempts}). Retrying in ${backoffMs}ms: ${String(
-          err?.message ?? err
-        )}`
-      );
-      await sleep2(backoffMs);
-    }
-  }
-  throw lastErr;
-}
 (async () => {
   try {
-    await runWithRetries();
+    await runWithRetries(run);
   } catch (err) {
     setFailed(String(err?.stack ?? err?.message ?? err));
   }

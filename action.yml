@@ -1,18 +1,37 @@
-name: "LLM Council Tool (MVP)"
-description: "Reviews GitHub pull requests using an LLM and posts feedback."
+name: "LLM Council Tool"
+description: "Reviews GitHub pull requests using an LLM council (multiple models + judge + confidence check) and posts feedback."
 author: "Kimeo + Clawd"
 
 inputs:
   github_token:
-    description: "GitHub token for API access (usually github.token)"
+    description: "GitHub token for API access (usually github.token). Also used for GitHub Models auth when llm_provider=github-models."
     required: false
+
+  llm_provider:
+    description: "LLM provider: github-models (Copilot/GitHub Models) or openai (API key)."
+    required: false
+    default: "github-models"
+
+  # OpenAI (only used when llm_provider=openai)
   openai_api_key:
-    description: "OpenAI API key"
-    required: true
-  openai_model:
-    description: "Model name"
+    description: "OpenAI API key (required when llm_provider=openai)."
     required: false
-    default: "gpt-4.1-mini"
+
+  # Model selection
+  review_models:
+    description: "Comma-separated list of 3 reviewer models. Example: gpt-4o,Meta-Llama-3.1-405B-Instruct,Mistral-large-2407"
+    required: false
+    default: "gpt-4o,Meta-Llama-3.1-405B-Instruct,Mistral-large-2407"
+  judge_model:
+    description: "Judge model (dedupe + synthesize)."
+    required: false
+    default: "gpt-4o"
+  verifier_model:
+    description: "Confidence checker model (validates findings against diff)."
+    required: false
+    default: "gpt-4o-mini"
+
+  # Budgets
   max_files:
     description: "Max files to review"
     required: false
@@ -22,9 +41,15 @@ inputs:
     required: false
     default: "6000"
   max_total_chars:
-    description: "Max total characters of diff content sent to the model"
+    description: "Max total characters of diff content sent to the models"
     required: false
     default: "120000"
+
+  min_confidence:
+    description: "Minimum confidence (0..1) required to surface a finding as confirmed."
+    required: false
+    default: "0.55"
+
   output_dir:
     description: "Directory (relative to GITHUB_WORKSPACE) to write review outputs"
     required: false
