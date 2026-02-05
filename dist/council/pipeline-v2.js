@@ -58,7 +58,13 @@ export async function runCouncil(cfg) {
         `You MUST quote exact evidence from the diff for every issue.\n\n` +
         `Output JSON ONLY (no markdown, no code fences).\n` +
         `Schema: {"schemaVersion":1,"issues":[{"issue_id":string,"title":string,"severity":"critical"|"high"|"medium"|"low","category":string,"file":string,"line_range":{"start":number,"end":number,"side":"RIGHT"|"LEFT"},"why_this_matters":string,"description":string,"evidence":string,"suggestion":string,"risk":number,"fix_effort":"xs"|"s"|"m"|"l"}]}`;
-    const reviewerUser = `Diff:\n\n${cfg.diffText}`;
+    const capText = (text, maxChars) => (text.length > maxChars ? text.slice(0, maxChars) + `\n\n[TRUNCATED to ${maxChars} chars]` : text);
+    const stageDiffFor = (spec) => {
+        // Be conservative for GitHub Models to avoid tokens_limit_reached.
+        const max = spec.provider === 'github-models' ? 20_000 : 80_000;
+        return capText(cfg.diffText, max);
+    };
+    const reviewerUser = (spec) => `Diff:\n\n${stageDiffFor(spec)}`;
     const reviewerOutputs = [];
     const usedReviewers = [];
     const isUnknownModel = (e) => /unknown_model/i.test(String(e?.message ?? e ?? '')) ||
@@ -71,7 +77,7 @@ export async function runCouncil(cfg) {
         try {
             const r = await callStage(cfg, label, spec, [
                 { role: 'system', content: reviewerSystem },
-                { role: 'user', content: reviewerUser },
+                { role: 'user', content: reviewerUser(spec) },
             ]);
             usage[label] = r.usage;
             reviewerOutputs.push({ model: `${spec.provider}:${spec.model}`, text: r.text, json: extractFirstJsonObject(r.text) });
@@ -93,9 +99,14 @@ export async function runCouncil(cfg) {
         `Every issue MUST include exact evidence quoted from diff.\n\n` +
         `Output JSON ONLY. SchemaVersion=1. issues[].issue_id must be stable short ids (I1,I2,...).\n` +
         `Return up to 25 issues.`;
-    const judgeUser = `Diff:\n\n${cfg.diffText}\n\n` +
+    const judgeUser = `Diff:\n\n${stageDiffFor(cfg.judge)}\n\n` +
+        `Reviewer issues (trimmed):\n\n` +
         reviewerOutputs
-            .map((o, idx) => `REVIEWER_${idx + 1} (${o.model}):\n${o.json ? JSON.stringify(o.json) : o.text}`)
+            .map((o, idx) => {
+            const issues = safeArray(o.json?.issues).slice(0, 20);
+            const payload = issues.length ? JSON.stringify({ schemaVersion: 1, issues }, null, 2) : o.text.slice(0, 4000);
+            return `REVIEWER_${idx + 1} (${o.model}):\n${payload}`;
+        })
             .join('\n\n');
     const judgeLabel = `judge_${cfg.judge.provider}:${cfg.judge.model}`;
     const judgeRes = await callStage(cfg, judgeLabel, cfg.judge, [
@@ -124,7 +135,7 @@ export async function runCouncil(cfg) {
         `If not clearly supported, mark unconfirmed with low confidence.\n` +
         `You MUST quote evidence from the diff in your response.\n\n` +
         `Output JSON ONLY: {"schemaVersion":1,"results":[{"issue_id":string,"confirmed":boolean,"confidence":number,"note":string,"evidence":string}]}`;
-    const verifierUser = `Diff:\n\n${cfg.diffText}\n\nIssues:\n\n${JSON.stringify(judgeIssues, null, 2)}`;
+    const verifierUser = `Diff:\n\n${stageDiffFor(cfg.verifier)}\n\nIssues:\n\n${JSON.stringify(judgeIssues, null, 2)}`;
     const verifyOnce = async (spec, label) => {
         const res = await callStage(cfg, label, spec, [
             { role: 'system', content: verifierSystem },

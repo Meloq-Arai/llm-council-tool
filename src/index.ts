@@ -161,8 +161,18 @@ async function main() {
 
   const maxFiles = Number(core.getInput('max_files') || '25');
   const maxPatchChars = Number(core.getInput('max_patch_chars') || '6000');
-  const maxTotalChars = Number(core.getInput('max_total_chars') || '120000');
+  let maxTotalChars = Number(core.getInput('max_total_chars') || '120000');
   const minConfidence = Number(core.getInput('min_confidence') || '0.6');
+
+  // GitHub Models (Copilot) often enforces ~8k input token limits on "high" tier models.
+  // Use a conservative character cap unless explicitly lower.
+  if (defaultProvider === 'github-models') {
+    const safeCap = 28_000;
+    if (maxTotalChars > safeCap) {
+      core.info(`Capping max_total_chars from ${maxTotalChars} to ${safeCap} for GitHub Models token limits.`);
+      maxTotalChars = safeCap;
+    }
+  }
 
   const outputDir = core.getInput('output_dir') || 'llm-council-tool-out';
   const writeFiles = (core.getInput('write_files') || 'true').toLowerCase() !== 'false';

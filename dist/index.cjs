@@ -24019,9 +24019,16 @@ You MUST quote exact evidence from the diff for every issue.
 
 Output JSON ONLY (no markdown, no code fences).
 Schema: {"schemaVersion":1,"issues":[{"issue_id":string,"title":string,"severity":"critical"|"high"|"medium"|"low","category":string,"file":string,"line_range":{"start":number,"end":number,"side":"RIGHT"|"LEFT"},"why_this_matters":string,"description":string,"evidence":string,"suggestion":string,"risk":number,"fix_effort":"xs"|"s"|"m"|"l"}]}`;
-  const reviewerUser = `Diff:
+  const capText = (text, maxChars) => text.length > maxChars ? text.slice(0, maxChars) + `
 
-${cfg.diffText}`;
+[TRUNCATED to ${maxChars} chars]` : text;
+  const stageDiffFor = (spec) => {
+    const max = spec.provider === "github-models" ? 2e4 : 8e4;
+    return capText(cfg.diffText, max);
+  };
+  const reviewerUser = (spec) => `Diff:
+
+${stageDiffFor(spec)}`;
   const reviewerOutputs = [];
   const usedReviewers = [];
   const isUnknownModel = (e) => /unknown_model/i.test(String(e?.message ?? e ?? "")) || /"code"\s*:\s*"unknown_model"/i.test(String(e?.message ?? ""));
@@ -24032,7 +24039,7 @@ ${cfg.diffText}`;
     try {
       const r = await callStage(cfg, label, spec, [
         { role: "system", content: reviewerSystem },
-        { role: "user", content: reviewerUser }
+        { role: "user", content: reviewerUser(spec) }
       ]);
       usage[label] = r.usage;
       reviewerOutputs.push({ model: `${spec.provider}:${spec.model}`, text: r.text, json: extractFirstJsonObject(r.text) });
@@ -24056,10 +24063,16 @@ Output JSON ONLY. SchemaVersion=1. issues[].issue_id must be stable short ids (I
 Return up to 25 issues.`;
   const judgeUser = `Diff:
 
-${cfg.diffText}
+${stageDiffFor(cfg.judge)}
 
-` + reviewerOutputs.map((o, idx) => `REVIEWER_${idx + 1} (${o.model}):
-${o.json ? JSON.stringify(o.json) : o.text}`).join("\n\n");
+Reviewer issues (trimmed):
+
+` + reviewerOutputs.map((o, idx) => {
+    const issues = safeArray(o.json?.issues).slice(0, 20);
+    const payload = issues.length ? JSON.stringify({ schemaVersion: 1, issues }, null, 2) : o.text.slice(0, 4e3);
+    return `REVIEWER_${idx + 1} (${o.model}):
+${payload}`;
+  }).join("\n\n");
   const judgeLabel = `judge_${cfg.judge.provider}:${cfg.judge.model}`;
   const judgeRes = await callStage(cfg, judgeLabel, cfg.judge, [
     { role: "system", content: judgeSystem },
@@ -24096,7 +24109,7 @@ You MUST quote evidence from the diff in your response.
 Output JSON ONLY: {"schemaVersion":1,"results":[{"issue_id":string,"confirmed":boolean,"confidence":number,"note":string,"evidence":string}]}`;
   const verifierUser = `Diff:
 
-${cfg.diffText}
+${stageDiffFor(cfg.verifier)}
 
 Issues:
 
@@ -24309,8 +24322,15 @@ async function main() {
   const criticModelRaw = getInput("critic_model");
   const maxFiles = Number(getInput("max_files") || "25");
   const maxPatchChars = Number(getInput("max_patch_chars") || "6000");
-  const maxTotalChars = Number(getInput("max_total_chars") || "120000");
+  let maxTotalChars = Number(getInput("max_total_chars") || "120000");
   const minConfidence = Number(getInput("min_confidence") || "0.6");
+  if (defaultProvider === "github-models") {
+    const safeCap = 28e3;
+    if (maxTotalChars > safeCap) {
+      info(`Capping max_total_chars from ${maxTotalChars} to ${safeCap} for GitHub Models token limits.`);
+      maxTotalChars = safeCap;
+    }
+  }
   const outputDir = getInput("output_dir") || "llm-council-tool-out";
   const writeFiles = (getInput("write_files") || "true").toLowerCase() !== "false";
   const addLabels = parseBool(getInput("add_labels"), true);

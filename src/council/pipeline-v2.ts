@@ -91,7 +91,15 @@ export async function runCouncil(cfg: CouncilConfig): Promise<{ final: FinalOutp
     `Output JSON ONLY (no markdown, no code fences).\n` +
     `Schema: {"schemaVersion":1,"issues":[{"issue_id":string,"title":string,"severity":"critical"|"high"|"medium"|"low","category":string,"file":string,"line_range":{"start":number,"end":number,"side":"RIGHT"|"LEFT"},"why_this_matters":string,"description":string,"evidence":string,"suggestion":string,"risk":number,"fix_effort":"xs"|"s"|"m"|"l"}]}`;
 
-  const reviewerUser = `Diff:\n\n${cfg.diffText}`;
+  const capText = (text: string, maxChars: number) => (text.length > maxChars ? text.slice(0, maxChars) + `\n\n[TRUNCATED to ${maxChars} chars]` : text);
+
+  const stageDiffFor = (spec: ModelSpec) => {
+    // Be conservative for GitHub Models to avoid tokens_limit_reached.
+    const max = spec.provider === 'github-models' ? 20_000 : 80_000;
+    return capText(cfg.diffText, max);
+  };
+
+  const reviewerUser = (spec: ModelSpec) => `Diff:\n\n${stageDiffFor(spec)}`;
 
   const reviewerOutputs: Array<{ model: string; text: string; json: any | null }> = [];
 
@@ -109,7 +117,7 @@ export async function runCouncil(cfg: CouncilConfig): Promise<{ final: FinalOutp
     try {
       const r = await callStage(cfg, label, spec, [
         { role: 'system', content: reviewerSystem },
-        { role: 'user', content: reviewerUser },
+        { role: 'user', content: reviewerUser(spec) },
       ]);
       usage[label] = r.usage;
       reviewerOutputs.push({ model: `${spec.provider}:${spec.model}`, text: r.text, json: extractFirstJsonObject(r.text) });
@@ -135,9 +143,14 @@ export async function runCouncil(cfg: CouncilConfig): Promise<{ final: FinalOutp
     `Return up to 25 issues.`;
 
   const judgeUser =
-    `Diff:\n\n${cfg.diffText}\n\n` +
+    `Diff:\n\n${stageDiffFor(cfg.judge)}\n\n` +
+    `Reviewer issues (trimmed):\n\n` +
     reviewerOutputs
-      .map((o, idx) => `REVIEWER_${idx + 1} (${o.model}):\n${o.json ? JSON.stringify(o.json) : o.text}`)
+      .map((o, idx) => {
+        const issues = safeArray(o.json?.issues).slice(0, 20);
+        const payload = issues.length ? JSON.stringify({ schemaVersion: 1, issues }, null, 2) : o.text.slice(0, 4000);
+        return `REVIEWER_${idx + 1} (${o.model}):\n${payload}`;
+      })
       .join('\n\n');
 
   const judgeLabel = `judge_${cfg.judge.provider}:${cfg.judge.model}`;
@@ -176,7 +189,7 @@ export async function runCouncil(cfg: CouncilConfig): Promise<{ final: FinalOutp
     `You MUST quote evidence from the diff in your response.\n\n` +
     `Output JSON ONLY: {"schemaVersion":1,"results":[{"issue_id":string,"confirmed":boolean,"confidence":number,"note":string,"evidence":string}]}`;
 
-  const verifierUser = `Diff:\n\n${cfg.diffText}\n\nIssues:\n\n${JSON.stringify(judgeIssues, null, 2)}`;
+  const verifierUser = `Diff:\n\n${stageDiffFor(cfg.verifier)}\n\nIssues:\n\n${JSON.stringify(judgeIssues, null, 2)}`;
 
   const verifyOnce = async (spec: ModelSpec, label: string) => {
     const res = await callStage(cfg, label, spec, [
